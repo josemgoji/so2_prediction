@@ -1,0 +1,1 @@
+'SO2_lag1', 'SO2_lag54', 'SO2_lag71', 'SO2_roll24_mean', 'SO2_roll24_min', 'SO2_roll48_mean', 'SO2_roll48_min', 'SO2_roll72_mean', 'SO2_stl_trend', 'SO2_stl_season', 'SO2_stl_resid'
