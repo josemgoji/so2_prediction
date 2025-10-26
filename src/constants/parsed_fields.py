@@ -133,6 +133,9 @@ FEATURE_SELECTION_CONFIG = {
     "selector_params": {},
     "regressor_params": {},
     "random_state": 15926,
+    # Configuración de organización de archivos
+    "organize_by_method": True,  # Organizar por método (lasso/rfecv)
+    "organize_by_exog": True,  # Organizar por exógenos (con/sin)
 }
 
 # Configuración de ejecución del pipeline (usado en run_feature_selection.py)

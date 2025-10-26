@@ -42,6 +42,8 @@ class FeatureSelector:
         selector_params: Optional[Dict] = None,
         regressor_params: Optional[Dict] = None,
         random_state: int = 15926,
+        organize_by_method: bool = False,
+        organize_by_exog: bool = False,
     ):
         """
         Inicializa el FeatureSelector.
@@ -71,6 +73,10 @@ class FeatureSelector:
             Parámetros específicos para el regresor
         random_state : int, default=15926
             Semilla para reproducibilidad
+        organize_by_method : bool, default=False
+            Si organizar archivos por método de selección (lasso/rfecv)
+        organize_by_exog : bool, default=False
+            Si organizar archivos por uso de variables exógenas (con/sin)
         """
         self.data_path = data_path
         self.output_path = output_path
@@ -83,6 +89,8 @@ class FeatureSelector:
         self.selector_params = selector_params or {}
         self.regressor_params = regressor_params or {}
         self.random_state = random_state
+        self.organize_by_method = organize_by_method
+        self.organize_by_exog = organize_by_exog
 
         # Inicializar componentes
         self.data_manager = DataManager()
@@ -341,7 +349,11 @@ class FeatureSelector:
         return results
 
     def save_selection_results(
-        self, results: Dict[str, Any], station: str, suffix: str = ""
+        self,
+        results: Dict[str, Any],
+        station: str,
+        suffix: str = "",
+        include_exog: bool = False,
     ) -> str:
         """
         Guarda los resultados de selección en archivos JSON.
@@ -354,19 +366,39 @@ class FeatureSelector:
             Nombre de la estación
         suffix : str, default=""
             Sufijo para el nombre del archivo
+        include_exog : bool, default=False
+            Si se incluyeron variables exógenas
 
         Returns:
         --------
         str
             Ruta del archivo guardado
         """
+        # Crear estructura de carpetas organizada
+        if self.organize_by_method or self.organize_by_exog:
+            # Crear subcarpetas según configuración
+            subdirs = []
+
+            if self.organize_by_method:
+                subdirs.append(self.selector_type)
+
+            if self.organize_by_exog:
+                exog_suffix = "con_exog" if include_exog else "sin_exog"
+                subdirs.append(exog_suffix)
+
+            # Crear ruta completa
+            output_dir = os.path.join(self.output_path, *subdirs)
+            os.makedirs(output_dir, exist_ok=True)
+        else:
+            output_dir = self.output_path
+
         # Crear nombre del archivo
         filename = f"selected_cols_{station}_{self.selector_type}_{self.regressor_type}"
         if suffix:
             filename += f"_{suffix}"
         filename += ".json"
 
-        filepath = os.path.join(self.output_path, filename)
+        filepath = os.path.join(output_dir, filename)
 
         # Guardar resultados
         with open(filepath, "w", encoding="utf-8") as f:
@@ -421,7 +453,9 @@ class FeatureSelector:
 
                 # Guardar resultados si se solicita
                 if save_results:
-                    self.save_selection_results(results, station)
+                    self.save_selection_results(
+                        results, station, include_exog=include_exog
+                    )
 
                 all_results[station] = results
 
