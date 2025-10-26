@@ -28,7 +28,7 @@ class LassoGridSelector(BaseEstimator):
         max_iter: int = 5000,
         tol: float = 1e-3,
         random_state: int | None = 123,
-        coef_threshold: float = 1e-8,  # umbral numérico para considerar coef ≠ 0
+        coef_threshold: float = 1e-8,
     ):
         self.alphas = alphas
         self.scorer = scorer
@@ -49,7 +49,7 @@ class LassoGridSelector(BaseEstimator):
     def fit(self, X: pd.DataFrame, y: pd.Series):
         if self.alphas is None:
             # rango típico y estable
-            self.alphas = np.logspace(-4, 0, 100)
+            self.alphas = np.logspace(-6, -3, 10)
 
         self.feature_names_in_ = np.array(X.columns)
 
