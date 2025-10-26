@@ -4,11 +4,11 @@ from pathlib import Path
 from src.services.data_builder import DataBuilderService
 from src.services.outlier_cleaner import DataCleaning
 from src.services.imputation import ImputationService
-from src.constants.parsed_fields import STAGE_DIR
 
 
 class DataPipeline:
-    def __init__(self):
+    def __init__(self, stage_dir: Path):
+        self.stage_dir = stage_dir
         self.dm = DataBuilderService()
         self.cleaner = DataCleaning(contamination=0.01, random_state=42)
         self.imputer = ImputationService()
@@ -19,12 +19,12 @@ class DataPipeline:
             target_col=station,
             pollutant_path=pollutant_path,
             meteo_path=meteo_path,
-            stage_dir=STAGE_DIR,
+            stage_dir=self.stage_dir,
             pollutant_name=pollutant,
         )
 
         # Guardar el DataFrame completo (target + exógenas) para trazabilidad
-        merged_folder_path = STAGE_DIR / f"{pollutant}/merged/"
+        merged_folder_path = self.stage_dir / f"{pollutant}/merged/"
         os.makedirs(merged_folder_path, exist_ok=True)
         self.dm.data_resource.save(
             df_raw, file_path=merged_folder_path / f"merged_{station}.csv"
@@ -94,7 +94,7 @@ class DataPipeline:
             df_imputed = df_imputed.drop(columns=outlier_columns)
 
         # Crear carpeta para el contaminante y estación
-        folder_path = STAGE_DIR / f"{pollutant}/clean/"
+        folder_path = self.stage_dir / f"{pollutant}/clean/"
         os.makedirs(folder_path, exist_ok=True)
 
         # Guardar el DataFrame imputado
@@ -108,7 +108,7 @@ class DataPipeline:
         """
         if output_path is None:
             # Usar la ruta por defecto
-            output_path = str(STAGE_DIR / "SO2/clean/")
+            output_path = str(self.stage_dir / "SO2/clean/")
 
         output_file = Path(output_path)
         output_file.parent.mkdir(parents=True, exist_ok=True)

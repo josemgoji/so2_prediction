@@ -33,6 +33,7 @@ class FeatureSelector:
         self,
         data_path: str = "data/stage/SO2",
         output_path: str = "data/stage/SO2/selected",
+        file_pattern: str = "{station}_test.csv",
         selector_type: str = "lasso",
         regressor_type: str = "lgbm",
         lags: int = 48,
@@ -51,6 +52,8 @@ class FeatureSelector:
             Ruta base donde están los datos enriched
         output_path : str, default="data/stage/SO2/selected"
             Ruta donde guardar los resultados de selección
+        file_pattern : str, default="{station}_test.csv"
+            Patrón de nombre de archivo. Usa {station} como placeholder
         selector_type : str, default="lasso"
             Tipo de selector: "lasso" o "rfecv"
         regressor_type : str, default="lgbm"
@@ -71,6 +74,7 @@ class FeatureSelector:
         """
         self.data_path = data_path
         self.output_path = output_path
+        self.file_pattern = file_pattern
         self.selector_type = selector_type
         self.regressor_type = regressor_type
         self.lags = lags
@@ -147,10 +151,9 @@ class FeatureSelector:
         tuple
             (data_enriched, data_exog) donde data_exog puede ser None
         """
-        # Cargar datos desde processed
-        processed_path = os.path.join(
-            self.data_path, "processed", f"{station}_test.csv"
-        )
+        # Cargar datos desde processed usando el patrón configurado
+        filename = self.file_pattern.format(station=station)
+        processed_path = os.path.join(self.data_path, "processed", filename)
 
         if not os.path.exists(processed_path):
             raise FileNotFoundError(f"No se encontró el archivo: {processed_path}")
