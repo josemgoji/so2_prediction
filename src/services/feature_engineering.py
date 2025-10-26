@@ -211,11 +211,8 @@ class FeatureEngineering:
             axis=1,
         )
 
-        # Eliminar valores faltantes al principio y al final
-        if trim_start > 0:
-            variables_exogenas = variables_exogenas.iloc[trim_start:, :]
-        if trim_end > 0:
-            variables_exogenas = variables_exogenas.iloc[:-trim_end, :]
+        # NOTA: El trimming se aplicará en el pipeline para mantener consistencia
+        # entre datos originales y características
 
         return variables_exogenas
 

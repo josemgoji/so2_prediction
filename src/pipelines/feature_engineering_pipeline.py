@@ -12,9 +12,6 @@ from ..recursos.data_manager import DataManager
 from ..services.feature_engineering import FeatureEngineering
 from ..constants.parsed_fields import (
     LOCATION_CONFIG,
-    DEFAULT_CALENDAR_FEATURES,
-    DEFAULT_TEMP_WINDOWS,
-    DEFAULT_TEMP_FUNCTIONS,
     DEFAULT_TRIM_START,
     DEFAULT_TRIM_END,
 )
@@ -134,11 +131,6 @@ class FeatureEngineeringPipeline:
         print("CREANDO CARACTERISTICAS DE FEATURE ENGINEERING")
         print("=" * 60)
 
-        # Usar valores por defecto si no se especifican
-        calendar_features = calendar_features or DEFAULT_CALENDAR_FEATURES
-        temp_windows = temp_windows or DEFAULT_TEMP_WINDOWS
-        temp_functions = temp_functions or DEFAULT_TEMP_FUNCTIONS
-
         print(
             f"Ubicacion configurada: {self.feature_engineering.location_config['name']}"
         )
@@ -148,7 +140,7 @@ class FeatureEngineeringPipeline:
         print(f"Funciones de temperatura: {temp_functions}")
 
         # Crear todas las características usando FeatureEngineering
-        self.feature_engineering_result = self.feature_engineering.create_all_features(
+        feature_engineering_features = self.feature_engineering.create_all_features(
             data=self.raw_data,
             calendar_features=calendar_features,
             temp_columns=temp_columns,
@@ -158,10 +150,43 @@ class FeatureEngineeringPipeline:
             trim_end=trim_end,
         )
 
-        print(
-            f"Caracteristicas de Feature Engineering creadas: {list(self.feature_engineering_result.columns)}"
+        # Combinar datos originales con características de feature engineering
+        # SIN aplicar trimming todavía - se hará después del merge
+        self.feature_engineering_result = pd.concat(
+            [self.raw_data, feature_engineering_features], axis=1
         )
-        print(f"Shape: {self.feature_engineering_result.shape}")
+
+        # Aplicar trimming después del merge para mantener consistencia
+        if trim_start > 0:
+            self.feature_engineering_result = self.feature_engineering_result.iloc[
+                trim_start:, :
+            ]
+        if trim_end > 0:
+            self.feature_engineering_result = self.feature_engineering_result.iloc[
+                :-trim_end, :
+            ]
+
+        print(
+            f"Caracteristicas de Feature Engineering creadas: {list(feature_engineering_features.columns)}"
+        )
+        print(f"Shape de características creadas: {feature_engineering_features.shape}")
+        print(f"Shape final combinado: {self.feature_engineering_result.shape}")
+
+        # Eliminar filas con valores nulos después del merge
+        print(
+            f"\nValores nulos antes de limpieza: {self.feature_engineering_result.isnull().sum().sum()}"
+        )
+        self.feature_engineering_result = self.feature_engineering_result.dropna()
+        print(
+            f"Valores nulos después de limpieza: {self.feature_engineering_result.isnull().sum().sum()}"
+        )
+        print(
+            f"Shape final después de eliminar nulos: {self.feature_engineering_result.shape}"
+        )
+
+        # NO aplicar asfreq después de eliminar nulos, ya que reintroduce gaps
+        # La frecuencia ya está establecida desde el inicio
+        print("Datos finales listos para feature selection")
 
         return self.feature_engineering_result
 

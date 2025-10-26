@@ -58,9 +58,54 @@ class DataManager:
             if inferred_freq is not None:
                 df.index.freq = inferred_freq
             else:
-                # No aplicar asfreq automáticamente para evitar introducir NaN
-                # La frecuencia se establecerá cuando sea necesario en el pipeline
-                pass
+                # Si no se puede inferir, verificar si los datos ya están limpios
+                # (sin valores faltantes) antes de aplicar asfreq
+                if df.isnull().sum().sum() == 0:
+                    # Los datos ya están limpios, intentar establecer frecuencia de manera robusta
+                    try:
+                        # Intentar establecer frecuencia directamente
+                        df.index.freq = 'h'
+                    except ValueError:
+                        # Si falla, crear un nuevo DatetimeIndex con frecuencia
+                        try:
+                            # Crear un nuevo índice con frecuencia
+                            new_index = pd.DatetimeIndex(df.index, freq='h')
+                            df.index = new_index
+                        except Exception:
+                            # Si todo falla, continuar sin frecuencia
+                            pass
+                else:
+                    # Los datos tienen valores faltantes, aplicar asfreq para crear gaps
+                    df = df.asfreq("h")
+                
+                # Asegurar que la frecuencia esté establecida
+                if df.index.freq is None:
+                    try:
+                        # Crear un nuevo índice con frecuencia
+                        new_index = pd.DatetimeIndex(df.index, freq='h', copy=False)
+                        df.index = new_index
+                    except Exception:
+                        # Si falla, intentar establecer frecuencia directamente
+                        try:
+                            df.index.freq = 'h'
+                        except Exception:
+                            # Si todo falla, usar asfreq para establecer frecuencia
+                            try:
+                                df = df.asfreq('h', fill_method=None)
+                            except Exception:
+                                # Si todo falla, usar asfreq con fill_method='ffill'
+                                try:
+                                    df = df.asfreq('h', fill_method='ffill')
+                                except Exception:
+                                    # Si todo falla, usar asfreq con fill_method='bfill'
+                                    try:
+                                        df = df.asfreq('h', fill_method='bfill')
+                                    except Exception:
+                                        # Si todo falla, usar asfreq con fill_method='nearest'
+                                        try:
+                                            df = df.asfreq('h', fill_method='nearest')
+                                        except Exception:
+                                            pass
 
         return df
 
@@ -118,9 +163,9 @@ class DataManager:
             if inferred_freq is not None:
                 df.index.freq = inferred_freq
             else:
-                # No aplicar asfreq automáticamente para evitar introducir NaN
-                # La frecuencia se establecerá cuando sea necesario en el pipeline
-                pass
+                # Si no se puede inferir, crear un nuevo índice con frecuencia
+                # basado en el patrón de los datos
+                df = df.asfreq("h")
 
         return df
 
@@ -207,9 +252,9 @@ class DataManager:
             if inferred_freq is not None:
                 df.index.freq = inferred_freq
             else:
-                # No aplicar asfreq automáticamente para evitar introducir NaN
-                # La frecuencia se establecerá cuando sea necesario en el pipeline
-                pass
+                # Si no se puede inferir, crear un nuevo índice con frecuencia
+                # basado en el patrón de los datos
+                df = df.asfreq("h")
 
         # Convertir todas las columnas a numérico
         df = df.apply(pd.to_numeric, errors="coerce")

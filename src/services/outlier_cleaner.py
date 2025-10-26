@@ -24,7 +24,7 @@ class DataCleaning:
             outlier_labels_uni: np.ndarray = None,
             outlier_labels_multi: np.ndarray = None,
         ):
-            self.df = df_clean  # For backward compatibility
+            self.df = df_clean
             self.df_clean = df_clean
             self.df_with_outliers = df_with_outliers
             self.outlier_labels_uni = outlier_labels_uni
@@ -104,7 +104,7 @@ class DataCleaning:
             df_clean = self.df_with_outliers.dropna(subset=required_cols).copy()
 
             if len(df_clean) == 0:
-                print(f"No hay datos válidos para graficar outliers multivariables")
+                print("No hay datos válidos para graficar outliers multivariables")
                 return
 
             plt.figure(figsize=(8, 6))
@@ -208,9 +208,12 @@ class DataCleaning:
         df_final["Curtosis_outlier"] = 0
         df_final.loc[df_multi.index, "Curtosis_outlier"] = df_multi["Curtosis_outlier"]
 
-        # Crear el DataFrame limpio eliminando outliers
-        mask = (df_final["IF_outlier"] == 0) & (df_final["Curtosis_outlier"] == 0)
-        df_clean = df_final.loc[mask].copy()
+        
+        df_clean = df_final.copy()
+        out_mask = (df_final["IF_outlier"] == 1) | (df_final["Curtosis_outlier"] == 1)
+
+        # Si solo quieres “romper” el target:
+        df_clean.loc[out_mask, "target"] = np.nan
 
         # Filtrar desde la primera fecha donde hay valores de target
         df_clean = filter_from_first_valid_date(df_clean, ["target"])

@@ -3,7 +3,6 @@ import pandas as pd
 
 from statsmodels.tsa.seasonal import STL
 
-from skforecast.preprocessing import RollingFeatures
 
 from ..constants.parsed_fields import (
     DEFAULT_WINDOW_PERIOD,
@@ -26,6 +25,7 @@ class FourierWindowFeatures:
         self.features_names = [f"fourier_sin_{period}_{k}" for k in range(1, K + 1)] + [
             f"fourier_cos_{period}_{k}" for k in range(1, K + 1)
         ]
+        self.window_sizes = [period]  # Skforecast requiere este atributo
         self._t_last = 0
 
     def transform_batch(self, y: pd.Series) -> pd.DataFrame:
@@ -65,6 +65,7 @@ class STLWindowFeatures:
         self.window = window or max(2 * period, 3 * period)
         self.robust = robust
         self.features_names = ["stl_trend", "stl_season", "stl_resid"]
+        self.window_sizes = [self.window]  # Skforecast requiere este atributo
 
     def transform_batch(self, y: pd.Series) -> pd.DataFrame:
         """
@@ -258,7 +259,7 @@ class WindowFeaturesGenerator:
         """Crea la lista de características de ventana."""
         self.window_features = [
             FourierWindowFeatures(period=self.period, K=self.fourier_k),
-            STLWindowFeatures(period=self.period, robust=self.stl_robust),
+            # STLWindowFeatures(period=self.period, robust=self.stl_robust),
             CustomRollingFeatures(
                 stats=self.stats,
                 window_sizes=self.window_sizes,

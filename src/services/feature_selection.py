@@ -3,24 +3,13 @@ Feature selection service using skforecast approach.
 Implements feature selection with RollingFeatures and RFECV selector.
 """
 
-import warnings
-import numpy as np
 import pandas as pd
 
-from skforecast import ForecasterRecursive
+from skforecast.recursive import ForecasterRecursive
 from skforecast.feature_selection import select_features
 
 from ..recursos.selectors import FeatureSelectorFactory
 from ..recursos.scorers import wmape_scorer
-from ..recursos.windows_features import WindowFeaturesGenerator
-
-
-# Suppress warnings for feature names
-warnings.filterwarnings(
-    "ignore",
-    message="X does not have valid feature names, but .* was fitted with feature names",
-)
-
 
 class SkforecastFeatureSelector:
     """
@@ -55,7 +44,7 @@ class SkforecastFeatureSelector:
             Random seed for reproducibility
         """
         self.lags = lags
-        self.window_features = window_features or []
+        self.window_features = window_features
         self.regressor = regressor
         self.selector_type = selector_type
         self.selector_params = selector_params or {}
@@ -112,25 +101,20 @@ class SkforecastFeatureSelector:
         tuple
             (selected_lags, selected_window_features, selected_exog)
         """
-        try:
-            selected_lags, selected_window_features, selected_exog = select_features(
-                forecaster=self.forecaster,
-                selector=self.selector,
-                y=y,
-                exog=exog,
-                select_only=select_only,
-                force_inclusion=force_inclusion,
-                subsample=subsample,
-                random_state=self.random_state,
-                verbose=verbose,
-            )
 
-            return selected_lags, selected_window_features, selected_exog
+        selected_lags, selected_window_features, selected_exog = select_features(
+            forecaster=self.forecaster,
+            selector=self.selector,
+            y=y,
+            exog=exog,
+            select_only=select_only,
+            force_inclusion=force_inclusion,
+            subsample=subsample,
+            random_state=self.random_state,
+            verbose=verbose,
+        )
 
-        except Exception as e:
-            print(f"Error during feature selection: {e}")
-            # Return default values if selection fails
-            return list(range(1, self.lags + 1)), None, None
+        return selected_lags, selected_window_features, selected_exog
 
     def get_feature_importance(self):
         """

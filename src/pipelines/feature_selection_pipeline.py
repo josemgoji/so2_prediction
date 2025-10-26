@@ -12,6 +12,10 @@ from ..recursos.data_manager import DataManager
 from ..services.feature_selection import SkforecastFeatureSelector
 from ..recursos.regressors import create_regressor
 from ..recursos.scorers import wmape_scorer
+from ..recursos.windows_features import (
+    WindowFeaturesGenerator,
+    create_default_window_features_generator,
+)
 
 
 class FeatureSelector:
@@ -33,6 +37,7 @@ class FeatureSelector:
         regressor_type: str = "lgbm",
         lags: int = 48,
         window_features: Optional[List] = None,
+        window_features_params: Optional[Dict] = None,
         selector_params: Optional[Dict] = None,
         regressor_params: Optional[Dict] = None,
         random_state: int = 15926,
@@ -53,7 +58,10 @@ class FeatureSelector:
         lags : int, default=48
             Número de lags a considerar
         window_features : list, optional
-            Lista de window features a usar
+            Lista de window features a usar (si se proporciona, se usa directamente)
+        window_features_params : dict, optional
+            Parámetros para generar window features automáticamente
+            Debe incluir: period, stats, window_sizes, fourier_k, stl_robust
         selector_params : dict, optional
             Parámetros específicos para el selector
         regressor_params : dict, optional
@@ -67,16 +75,32 @@ class FeatureSelector:
         self.regressor_type = regressor_type
         self.lags = lags
         self.window_features = window_features
+        self.window_features_params = window_features_params or {}
         self.selector_params = selector_params or {}
         self.regressor_params = regressor_params or {}
         self.random_state = random_state
 
         # Inicializar componentes
         self.data_manager = DataManager()
+        self._setup_window_features()
         self._setup_selector()
 
         # Crear directorio de salida si no existe
         os.makedirs(self.output_path, exist_ok=True)
+
+    def _setup_window_features(self):
+        """Configura las window features."""
+        if self.window_features is not None:
+            # Si se proporcionan window features directamente, usarlas
+            self.window_features_list = self.window_features
+        elif self.window_features_params:
+            # Si se proporcionan parámetros, crear window features automáticamente
+            window_generator = WindowFeaturesGenerator(**self.window_features_params)
+            self.window_features_list = window_generator.get_window_features()
+        else:
+            # Usar configuración por defecto
+            window_generator = create_default_window_features_generator()
+            self.window_features_list = window_generator.get_window_features()
 
     def _setup_selector(self):
         """Configura el selector de características."""
@@ -98,7 +122,7 @@ class FeatureSelector:
         # Crear selector
         self.selector = SkforecastFeatureSelector(
             lags=self.lags,
-            window_features=self.window_features,
+            window_features=self.window_features_list,
             regressor=regressor,
             selector_type=self.selector_type,
             selector_params=selector_params,
@@ -123,29 +147,34 @@ class FeatureSelector:
         tuple
             (data_enriched, data_exog) donde data_exog puede ser None
         """
-        # Cargar datos enriched
-        enriched_path = os.path.join(
-            self.data_path, "enrichment", f"enriched_{station}.csv"
+        # Cargar datos desde processed
+        processed_path = os.path.join(
+            self.data_path, "processed", f"{station}_test.csv"
         )
 
-        if not os.path.exists(enriched_path):
-            raise FileNotFoundError(f"No se encontró el archivo: {enriched_path}")
+        if not os.path.exists(processed_path):
+            raise FileNotFoundError(f"No se encontró el archivo: {processed_path}")
 
-        data_enriched = self.data_manager.load_data(enriched_path)
+        data_full = self.data_manager.load_data(processed_path)
 
-        # Cargar datos exógenos si se solicita
-        data_exog = None
-        if include_exog:
-            exog_path = os.path.join(
-                self.data_path,
-                "enrichment_exogenous",
-                f"enriched_{station}_exogenous.csv",
-            )
+        # Establecer frecuencia horaria si no está definida
+        if not data_full.index.freq:
+            data_full = data_full.asfreq("h")
 
-            if os.path.exists(exog_path):
-                data_exog = self.data_manager.load_data(exog_path)
+        data_full.info()
 
-        return data_enriched, data_exog
+        # Si no se incluyen exógenos, solo devolver el target
+        if not include_exog:
+            # Usar la columna "target" como objetivo
+            if "target" not in data_full.columns:
+                raise KeyError("No se encontró la columna 'target' en los datos")
+
+            data_enriched = data_full[["target"]].copy()  # Mantener como DataFrame
+        else:
+            # Si se incluyen exógenos, devolver todos los datos
+            data_enriched = data_full.copy()
+
+        return data_enriched, None
 
     def prepare_data_for_selection(
         self, data: pd.DataFrame, target_column: str = "target"
@@ -170,7 +199,6 @@ class FeatureSelector:
                 f"Columna objetivo '{target_column}' no encontrada en los datos"
             )
 
-        # Separar target y exógenas (todo lo que no sea target es exógeno)
         y = data[target_column].copy()
         exog = data.drop(columns=[target_column]).copy()
 
@@ -211,9 +239,70 @@ class FeatureSelector:
         # Preparar datos
         y, exog = self.prepare_data_for_selection(data_enriched)
 
-        # Combinar exógenas si hay datos exógenos adicionales
-        if include_exog and data_exog is not None:
-            exog = pd.concat([exog, data_exog], axis=1)
+        # Establecer frecuencia horaria en el índice
+        if not y.index.freq:
+            y = y.asfreq("h")
+        if not exog.index.freq:
+            exog = exog.asfreq("h")
+
+        print(y.info())
+        print(exog.info())
+
+        # Análisis detallado de valores faltantes
+        print("\n=== ANÁLISIS DE VALORES FALTANTES ===")
+        print(f"Total de registros: {len(y)}")
+        print(f"Valores no nulos: {y.notna().sum()}")
+        print(f"Valores faltantes: {y.isna().sum()}")
+        print(
+            f"Porcentaje de valores faltantes: {(y.isna().sum() / len(y)) * 100:.2f}%"
+        )
+
+        # Verificar si los faltantes están al principio
+        first_valid_idx = y.first_valid_index()
+        last_valid_idx = y.last_valid_index()
+        print(f"Primer valor válido: {first_valid_idx}")
+        print(f"Último valor válido: {last_valid_idx}")
+
+        # Verificar patrones de faltantes
+        missing_at_start = y.index[0] != first_valid_idx
+        missing_at_end = y.index[-1] != last_valid_idx
+        print(f"¿Faltantes al inicio?: {missing_at_start}")
+        print(f"¿Faltantes al final?: {missing_at_end}")
+
+        # Mostrar algunos ejemplos de valores faltantes
+        missing_indices = y[y.isna()].index
+        if len(missing_indices) > 0:
+            print("\nPrimeros 10 índices con valores faltantes:")
+            for i, idx in enumerate(missing_indices[:10]):
+                print(f"  {i + 1}. {idx}")
+
+            if len(missing_indices) > 10:
+                print(f"  ... y {len(missing_indices) - 10} más")
+
+        # Verificar si hay gaps consecutivos
+        if len(missing_indices) > 0:
+            consecutive_gaps = []
+            current_gap_start = missing_indices[0]
+            current_gap_length = 1
+
+            for i in range(1, len(missing_indices)):
+                if missing_indices[i] == missing_indices[i - 1] + pd.Timedelta(hours=1):
+                    current_gap_length += 1
+                else:
+                    consecutive_gaps.append((current_gap_start, current_gap_length))
+                    current_gap_start = missing_indices[i]
+                    current_gap_length = 1
+            consecutive_gaps.append((current_gap_start, current_gap_length))
+
+            print("\nGaps consecutivos encontrados:")
+            for gap_start, gap_length in consecutive_gaps[
+                :5
+            ]:  # Mostrar solo los primeros 5
+                gap_end = gap_start + pd.Timedelta(hours=gap_length - 1)
+                print(f"  - {gap_start} a {gap_end} ({gap_length} horas)")
+
+            if len(consecutive_gaps) > 5:
+                print(f"  ... y {len(consecutive_gaps) - 5} gaps más")
 
         # Realizar selección
         selected_lags, selected_window_features, selected_exog = (
@@ -349,3 +438,28 @@ class FeatureSelector:
             Información de importancia de características
         """
         return self.selector.get_feature_importance()
+
+    def get_window_features_info(self) -> Dict[str, Any]:
+        """
+        Obtiene información sobre las window features configuradas.
+
+        Returns:
+        --------
+        dict
+            Información sobre las window features
+        """
+        info = {
+            "window_features_count": len(self.window_features_list),
+            "window_features_types": [],
+        }
+
+        for feature in self.window_features_list:
+            feature_type = type(feature).__name__
+            info["window_features_types"].append(feature_type)
+
+            if hasattr(feature, "features_names"):
+                info[f"{feature_type}_names"] = feature.features_names
+            elif hasattr(feature, "get_feature_names"):
+                info[f"{feature_type}_names"] = feature.get_feature_names()
+
+        return info

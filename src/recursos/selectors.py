@@ -107,6 +107,15 @@ class LassoGridSelector(BaseEstimator):
             raise RuntimeError("Call fit() before transform().")
         keep_cols = self.feature_names_in_[self.support_mask_]
         return X.loc[:, keep_cols]
+    
+    def get_feature_names_out(self, input_features=None):
+        """
+        Get output feature names for transformation.
+        Required by skforecast.
+        """
+        if self.support_mask_ is None:
+            raise RuntimeError("Call fit() before get_feature_names_out().")
+        return self.feature_names_in_[self.support_mask_]
 
 
 # ---- Factory para seleccionar entre Lasso y RFECV ----

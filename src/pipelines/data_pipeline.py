@@ -29,9 +29,6 @@ class DataPipeline:
         self.dm.data_resource.save(
             df_raw, file_path=merged_folder_path / f"merged_{station}.csv"
         )
-        print(
-            f"DataFrame completo guardado en: {merged_folder_path / f'merged_{station}.csv'}"
-        )
 
         # Aplicar asfreq("h") ANTES de la limpieza para mantener frecuencia regular
         df_with_freq = df_raw.asfreq("h")
@@ -43,6 +40,8 @@ class DataPipeline:
 
         # Acceder al DataFrame limpio
         df_clean = result.df
+
+        print(f"DataFrame limpio: {df_clean.info()}")
 
         # Crear carpeta para guardar imágenes
         images_folder = Path("images") / f"{pollutant}_{station}"
