@@ -31,17 +31,21 @@ from skforecast.model_selection import (
 
 from sklearn.preprocessing import FunctionTransformer
 
+# ===== 💡 Configuración de estación =====
+STATION = "GIR-EPM"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
+
+print(f"🚀 Ejecutando modelo para la estación: {STATION}")
+
 # ===== 1) Cargar datos base =====
-df = DataManager().load_data("data/stage/SO2/processed/processed_GIR-EPM.csv")
+df = DataManager().load_data(f"data/stage/SO2/processed/processed_{STATION}.csv")
 df = df.sort_index()
-# df = df.asfreq("H")  # si necesitas forzar frecuencia horaria fija
 
 # ===== 2) Configuración columns =====
 TARGET_COL = "target"
 
 # ===== 3) Cargar selección desde JSON =====
 feat_sel_path = Path(
-    "data/stage/SO2/selected/lasso/con_exog/selected_cols_CEN-TRAF_lasso_rf.json"
+    f"data/stage/SO2/selected/lasso/con_exog/selected_cols_{STATION}_lasso_rf.json"
 )
 with open(feat_sel_path, "r", encoding="utf-8") as f:
     sel = json.load(f)
@@ -87,32 +91,38 @@ y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainv
     )
 )
 
+# ===== 💡 Control de pesos para gaps =====
+USE_WEIGHTS = True  # Cambiar a False para desactivar los pesos de gaps
+
 # ===== 💡 Cargar archivo de pesos y crear weight_func =====
-weights_path = Path("data/stage/SO2/marks/weights_GIR-EPM.csv")
-weights = pd.read_csv(weights_path, parse_dates=["datetime"]).set_index("datetime")[
-    "weight"
-]
+if USE_WEIGHTS:
+    weights_path = Path(f"data/stage/SO2/marks/weights_{STATION}.csv")
+    weights = pd.read_csv(weights_path, parse_dates=["datetime"]).set_index("datetime")[
+        "weight"
+    ]
 
-
-def weight_func(index: pd.DatetimeIndex) -> np.ndarray:
-    """
-    Devuelve un vector de pesos alineado al índice temporal del fold actual.
-    Los huecos o zonas imputadas (weight=0) no influyen en el entrenamiento.
-    """
-    return weights.reindex(index).fillna(1.0).to_numpy()
-
+    def weight_func(index: pd.DatetimeIndex) -> np.ndarray:
+        """
+        Devuelve un vector de pesos alineado al índice temporal del fold actual.
+        Los huecos o zonas imputadas (weight=0) no influyen en el entrenamiento.
+        """
+        return weights.reindex(index).fillna(1.0).to_numpy()
+else:
+    weight_func = None
 
 # ===== 6) Forecaster recursivo =====
-forecaster = ForecasterRecursive(
-    regressor=LGBMRegressor(random_state=123, verbose=-1),
-    lags=selected_lags,
-    window_features=window_features,
-    weight_func=weight_func,
-    transformer_y=FunctionTransformer(
-        func=np.log1p, 
-        inverse_func=np.expm1
-    ),
-)
+forecaster_params = {
+    "regressor": LGBMRegressor(random_state=123, verbose=-1),
+    "lags": selected_lags,
+    "window_features": window_features,
+    "transformer_y": FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
+}
+
+# Solo agregar weight_func si está habilitado
+if USE_WEIGHTS:
+    forecaster_params["weight_func"] = weight_func
+
+forecaster = ForecasterRecursive(**forecaster_params)
 
 # ===== 7) Backtesting + Random Search (tuning robusto) =====
 
