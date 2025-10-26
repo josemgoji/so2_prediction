@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Pipeline de Feature Engineering para series temporales de SO2.
-Combina la carga de datos con la generación de características exógenas.
+- Frecuencia fija 'h'
+- Auto-trim simple por ventana máxima (en horas)
+- Imputación de NaNs SOLO en columnas originales (interpolate + ffill + bfill)
+- Logs de depuración y verificación de continuidad del índice
 """
 
 import pandas as pd
@@ -17,62 +20,47 @@ from ..constants.parsed_fields import (
 )
 
 
+def _auto_trim_hours(temp_windows: Optional[List[str]]) -> int:
+    """
+    Devuelve el recorte inicial mínimo en filas para cubrir la ventana máxima.
+    Asume ventanas como '3h','6h','24h',... y frecuencia fija horaria.
+    """
+    if not temp_windows:
+        return 0
+    hours = []
+    for w in temp_windows:
+        wl = w.lower().strip()
+        if wl.endswith("h"):
+            try:
+                hours.append(int(wl[:-1]))
+            except ValueError:
+                pass
+    return max(hours) if hours else 0
+
+
 class FeatureEngineeringPipeline:
-    """
-    Pipeline completo para Feature Engineering de series temporales.
-
-    Esta clase combina:
-    - Carga de datos usando DataManager
-    - Generación de características exógenas usando FeatureEngineering
-    - Guardado de resultados procesados
-    """
-
     def __init__(
         self,
         location_config: Optional[Dict] = None,
         date_column: str = "datetime",
     ):
-        """
-        Inicializa el pipeline de Feature Engineering.
-
-        Parameters:
-        -----------
-        location_config : dict, optional
-            Configuración de ubicación para variables solares
-        date_column : str, default "datetime"
-            Nombre de la columna de fecha en los CSVs
-        """
         self.location_config = location_config or LOCATION_CONFIG
         self.date_column = date_column
 
-        # Inicializar componentes
         self.data_manager = DataManager(date_column=date_column)
         self.feature_engineering = FeatureEngineering(
             location_config=self.location_config
         )
 
-        # Estado del pipeline
-        self.raw_data = None
-        self.processed_data = None
-        self.feature_engineering_result = None
+        self.raw_data: Optional[pd.DataFrame] = None
+        self.processed_data: Optional[pd.DataFrame] = None
+        self.feature_engineering_result: Optional[pd.DataFrame] = None
 
+    # -----------------------------------------------------
+    # 1. Carga
+    # -----------------------------------------------------
     def load_data(self, file_path: str) -> pd.DataFrame:
-        """
-        Carga datos desde un archivo CSV usando DataManager.
-
-        Parameters:
-        -----------
-        file_path : str
-            Ruta al archivo CSV
-
-        Returns:
-        --------
-        pd.DataFrame
-            DataFrame cargado con datetime como índice
-        """
         print(f"Cargando datos desde: {file_path}")
-
-        # Cargar datos usando DataManager
         self.raw_data = self.data_manager.load_data(file_path)
 
         print(
@@ -83,15 +71,16 @@ class FeatureEngineeringPipeline:
         )
         print(f"Columnas disponibles: {list(self.raw_data.columns)}")
 
-        # Mostrar estadísticas básicas
-        print("\nEstadisticas basicas:")
-        print("   - Valores faltantes por columna:")
+        print("\nEstadísticas básicas:")
         for col in self.raw_data.columns:
             missing = self.raw_data[col].isnull().sum()
-            print(f"     {col}: {missing} ({missing / len(self.raw_data) * 100:.1f}%)")
+            print(f"   - {col}: {missing} ({missing / len(self.raw_data) * 100:.3f}%)")
 
         return self.raw_data
 
+    # -----------------------------------------------------
+    # 2. Creación de features
+    # -----------------------------------------------------
     def create_feature_engineering_features(
         self,
         temp_columns: List[str],
@@ -101,95 +90,128 @@ class FeatureEngineeringPipeline:
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
     ) -> pd.DataFrame:
-        """
-        Crea características de Feature Engineering usando el servicio FeatureEngineering.
-
-        Parameters:
-        -----------
-        temp_columns : list
-            Lista de columnas de temperatura (requerido)
-        calendar_features : list, optional
-            Características de calendario a extraer
-        temp_windows : list, optional
-            Ventanas para características de temperatura
-        temp_functions : list, optional
-            Funciones para características de temperatura
-        trim_start : int, default DEFAULT_TRIM_START
-            Filas a eliminar al inicio
-        trim_end : int, default DEFAULT_TRIM_END
-            Filas a eliminar al final
-
-        Returns:
-        --------
-        pd.DataFrame
-            DataFrame con características de Feature Engineering
-        """
         if self.raw_data is None:
             raise ValueError("No hay datos cargados. Ejecuta load_data() primero.")
 
-        print("\n" + "=" * 60)
-        print("CREANDO CARACTERISTICAS DE FEATURE ENGINEERING")
-        print("=" * 60)
+        print("\n" + "=" * 70)
+        print("CREANDO CARACTERÍSTICAS DE FEATURE ENGINEERING")
+        print("=" * 70)
 
-        print(
-            f"Ubicacion configurada: {self.feature_engineering.location_config['name']}"
-        )
-        print(f"Caracteristicas de calendario: {calendar_features}")
-        print(f"Columnas de temperatura: {temp_columns}")
-        print(f"Ventanas de temperatura: {temp_windows}")
-        print(f"Funciones de temperatura: {temp_functions}")
+        # --- Frecuencia fija horaria ---
+        infer_freq = "h"
+        base_delta = pd.Timedelta(hours=1)
 
-        # Crear todas las características usando FeatureEngineering
+        # --- Auto-trim simple en horas ---
+        auto_trim = _auto_trim_hours(temp_windows)
+        eff_trim_start = max(trim_start or 0, auto_trim)
+
+        print(f"Ubicación: {self.feature_engineering.location_config['name']}")
+        print(f"Frecuencia: {infer_freq} (delta típico={base_delta})")
+        print(f"Temp columns: {temp_columns}")
+        print(f"Temp windows: {temp_windows}")
+        print(f"Temp functions: {temp_functions}")
+        print(f"Trim (user): start={trim_start}, end={trim_end}")
+        print(f"Trim (auto por ventanas): start={auto_trim}")
+        print(f"Trim (efectivo): start={eff_trim_start}, end={trim_end}")
+
+        # -------------------------------------------------
+        # Imputar columnas crudas con NaN (antes de crear features)
+        # -------------------------------------------------
+        raw_with_patch = self.raw_data.copy()
+        cols_with_nan = raw_with_patch.columns[raw_with_patch.isna().any()].tolist()
+        if cols_with_nan:
+            print(
+                f"[INFO] Imputando NaN crudos en columnas originales: {cols_with_nan} "
+                f"(interpolate + ffill + bfill)"
+            )
+            for c in cols_with_nan:
+                n_before = raw_with_patch[c].isna().sum()
+                raw_with_patch[c] = (
+                    raw_with_patch[c]
+                    .interpolate(limit=2)  # huecos cortos
+                    .ffill()
+                    .bfill()
+                )
+                n_after = raw_with_patch[c].isna().sum()
+                print(f"    → {c}: {n_before} → {n_after} NaNs")
+        else:
+            print("[INFO] No hay NaNs en columnas originales.")
+
+        # -------------------------------------------------
+        # Crear engineered features (con freq fija 'h')
+        # -------------------------------------------------
         feature_engineering_features = self.feature_engineering.create_all_features(
-            data=self.raw_data,
+            data=raw_with_patch,
             calendar_features=calendar_features,
             temp_columns=temp_columns,
             temp_windows=temp_windows,
             temp_functions=temp_functions,
-            trim_start=trim_start,
+            trim_start=eff_trim_start,
             trim_end=trim_end,
+            freq=infer_freq,  # fijo 'h'
         )
 
-        # Combinar datos originales con características de feature engineering
-        # SIN aplicar trimming todavía - se hará después del merge
-        self.feature_engineering_result = pd.concat(
-            [self.raw_data, feature_engineering_features], axis=1
-        )
-
-        # Aplicar trimming después del merge para mantener consistencia
-        if trim_start > 0:
-            self.feature_engineering_result = self.feature_engineering_result.iloc[
-                trim_start:, :
-            ]
-        if trim_end > 0:
-            self.feature_engineering_result = self.feature_engineering_result.iloc[
-                :-trim_end, :
-            ]
-
+        # Debug: NaNs en engineered features antes del merge
+        nan_pre = feature_engineering_features[
+            feature_engineering_features.isna().any(axis=1)
+        ]
         print(
-            f"Caracteristicas de Feature Engineering creadas: {list(feature_engineering_features.columns)}"
+            f"[DEBUG] NaNs en engineered features (antes del merge): {len(nan_pre)} filas"
         )
-        print(f"Shape de características creadas: {feature_engineering_features.shape}")
-        print(f"Shape final combinado: {self.feature_engineering_result.shape}")
+        if not nan_pre.empty:
+            for ts, row in nan_pre.iloc[:5].iterrows():
+                bad_cols = row.index[row.isna()].tolist()
+                print(f"  - {ts}: {bad_cols}")
 
-        # Eliminar filas con valores nulos después del merge
-        print(
-            f"\nValores nulos antes de limpieza: {self.feature_engineering_result.isnull().sum().sum()}"
-        )
-        self.feature_engineering_result = self.feature_engineering_result.dropna()
-        print(
-            f"Valores nulos después de limpieza: {self.feature_engineering_result.isnull().sum().sum()}"
-        )
-        print(
-            f"Shape final después de eliminar nulos: {self.feature_engineering_result.shape}"
-        )
+        # -------------------------------------------------
+        # Merge + trimming
+        # -------------------------------------------------
+        merged = pd.concat([raw_with_patch, feature_engineering_features], axis=1)
 
-        # NO aplicar asfreq después de eliminar nulos, ya que reintroduce gaps
-        # La frecuencia ya está establecida desde el inicio
-        print("Datos finales listos para feature selection")
+        if eff_trim_start > 0:
+            merged = merged.iloc[eff_trim_start:, :]
+        if trim_end and trim_end > 0:
+            merged = merged.iloc[:-trim_end, :]
+
+        self.feature_engineering_result = merged
+
+        # Debug: NaNs después del merge
+        nan_post = merged[merged.isna().any(axis=1)]
+        print(f"[DEBUG] NaNs tras el merge (todas las columnas): {len(nan_post)} filas")
+        if not nan_post.empty:
+            print("[DEBUG] Timestamps con NaN restantes (en originales):")
+            print(list(nan_post.index[:10]))
+
+        # -------------------------------------------------
+        # Dropna solo en engineered features
+        # -------------------------------------------------
+        eng_cols = feature_engineering_features.columns
+        mask_ok = ~merged[eng_cols].isna().any(axis=1)
+        dropped = (~mask_ok).sum()
+        print(f"Filas eliminadas por NaN en engineered features: {dropped}")
+        self.feature_engineering_result = merged.loc[mask_ok]
+
+        # -------------------------------------------------
+        # Verificación de continuidad del índice
+        # -------------------------------------------------
+        diffs = self.feature_engineering_result.index.to_series().diff().dropna()
+        if not diffs.eq(pd.Timedelta(hours=1)).all():
+            uniq = diffs.value_counts().head(5)
+            raise RuntimeError(
+                f"[ASSERT] Gap detectado: deltas no constantes.\nTop deltas:\n{uniq}"
+            )
+        else:
+            print("[ASSERT] Índice continuo verificado (1h constante).")
+
+        print(f"Shape engineered features: {feature_engineering_features.shape}")
+        print(f"Shape combinado final: {self.feature_engineering_result.shape}")
+        print("Datos finales listos para selección de variables / modelado.")
 
         return self.feature_engineering_result
 
+    # -----------------------------------------------------
+    # 3. Orquestador completo
+    # -----------------------------------------------------
     def run_complete_pipeline(
         self,
         file_path: str,
@@ -200,40 +222,12 @@ class FeatureEngineeringPipeline:
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
     ) -> Dict[str, Any]:
-        """
-        Ejecuta el pipeline completo de Feature Engineering.
-
-        Parameters:
-        -----------
-        file_path : str
-            Ruta al archivo CSV
-        temp_columns : list
-            Lista de columnas de temperatura (requerido)
-        calendar_features : list, optional
-            Características de calendario a extraer
-        temp_windows : list, optional
-            Ventanas para características de temperatura
-        temp_functions : list, optional
-            Funciones para características de temperatura
-        trim_start : int, default DEFAULT_TRIM_START
-            Filas a eliminar al inicio
-        trim_end : int, default DEFAULT_TRIM_END
-            Filas a eliminar al final
-
-        Returns:
-        --------
-        dict
-            Diccionario con todos los resultados del pipeline
-        """
         print("INICIANDO PIPELINE COMPLETO DE FEATURE ENGINEERING")
-        print("=" * 60)
+        print("=" * 70)
 
         try:
-            # 1. Cargar datos
             raw_data = self.load_data(file_path)
-
-            # 2. Crear características de Feature Engineering
-            feature_engineering_result = self.create_feature_engineering_features(
+            result = self.create_feature_engineering_features(
                 temp_columns=temp_columns,
                 calendar_features=calendar_features,
                 temp_windows=temp_windows,
@@ -241,30 +235,20 @@ class FeatureEngineeringPipeline:
                 trim_start=trim_start,
                 trim_end=trim_end,
             )
+            self.processed_data = result
 
-            # 3. Asignar resultados finales
-            self.processed_data = feature_engineering_result
-
-            # Crear diccionario de resultados
-            results = {
-                "raw_data": raw_data,
-                "feature_engineering_result": feature_engineering_result,
-                "processed_data": self.processed_data,
-                "pipeline_config": {
-                    "location_config": self.location_config,
-                },
-            }
-
-            print("\n" + "=" * 60)
+            print("\n" + "=" * 70)
             print("PIPELINE COMPLETADO EXITOSAMENTE")
-            print("=" * 60)
+            print("=" * 70)
             print(f"Datos originales: {raw_data.shape}")
-            print(
-                f"Caracteristicas de Feature Engineering: {feature_engineering_result.shape}"
-            )
             print(f"Datos procesados finales: {self.processed_data.shape}")
 
-            return results
+            return {
+                "raw_data": raw_data,
+                "processed_data": self.processed_data,
+                "feature_engineering_result": self.feature_engineering_result,
+                "pipeline_config": {"location_config": self.location_config},
+            }
 
         except Exception as e:
             print(f"\nERROR DURANTE EL PIPELINE: {str(e)}")
@@ -273,47 +257,27 @@ class FeatureEngineeringPipeline:
             traceback.print_exc()
             raise
 
+    # -----------------------------------------------------
+    # 4. Guardado y resumen
+    # -----------------------------------------------------
     def save_results(self, output_path: str, include_raw: bool = False):
-        """
-        Guarda los resultados del pipeline en archivos CSV.
-
-        Parameters:
-        -----------
-        output_path : str
-            Ruta base donde guardar los archivos
-        include_raw : bool, default False
-            Si incluir los datos originales en el guardado
-        """
         if self.processed_data is None:
             raise ValueError(
                 "No hay datos procesados para guardar. Ejecuta el pipeline primero."
             )
-
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.data_manager.save(
+            self.processed_data, str(output_path.with_suffix(".csv"))
+        )
+        print(f"Datos procesados guardados en: {output_path}")
 
-        print(f"Guardando resultados en: {output_path}")
-
-        # Guardar datos procesados
-        processed_path = output_path.with_suffix(".csv")
-        self.data_manager.save(self.processed_data, str(processed_path))
-        print(f"Datos procesados guardados en: {processed_path}")
-
-        # Guardar datos originales si se solicita
         if include_raw and self.raw_data is not None:
             raw_path = output_path.with_name(f"{output_path.stem}_raw.csv")
             self.data_manager.save(self.raw_data, str(raw_path))
             print(f"Datos originales guardados en: {raw_path}")
 
     def get_summary(self) -> Dict[str, Any]:
-        """
-        Obtiene un resumen de los resultados del pipeline.
-
-        Returns:
-        --------
-        dict
-            Diccionario con resumen de resultados
-        """
         summary = {
             "pipeline_status": "completed"
             if self.processed_data is not None
@@ -321,15 +285,9 @@ class FeatureEngineeringPipeline:
             "data_info": {},
             "features_info": {},
         }
-
         if self.raw_data is not None:
             summary["data_info"]["raw_shape"] = self.raw_data.shape
             summary["data_info"]["raw_columns"] = list(self.raw_data.columns)
-            summary["data_info"]["date_range"] = {
-                "start": str(self.raw_data.index.min()),
-                "end": str(self.raw_data.index.max()),
-            }
-
         if self.feature_engineering_result is not None:
             summary["features_info"]["feature_engineering_shape"] = (
                 self.feature_engineering_result.shape
@@ -337,41 +295,16 @@ class FeatureEngineeringPipeline:
             summary["features_info"]["feature_engineering_columns"] = list(
                 self.feature_engineering_result.columns
             )
-
         if self.processed_data is not None:
             summary["data_info"]["processed_shape"] = self.processed_data.shape
-
         return summary
 
 
 def create_default_pipeline() -> FeatureEngineeringPipeline:
-    """
-    Crea un pipeline de Feature Engineering con valores por defecto.
-
-    Returns:
-    --------
-    FeatureEngineeringPipeline
-        Instancia configurada con valores por defecto
-    """
     return FeatureEngineeringPipeline()
 
 
 def create_custom_pipeline(
     location_config: Optional[Dict] = None,
 ) -> FeatureEngineeringPipeline:
-    """
-    Crea un pipeline de Feature Engineering con configuración personalizada.
-
-    Parameters:
-    -----------
-    location_config : dict, optional
-        Configuración de ubicación para variables solares
-
-    Returns:
-    --------
-    FeatureEngineeringPipeline
-        Instancia configurada con parámetros personalizados
-    """
-    return FeatureEngineeringPipeline(
-        location_config=location_config,
-    )
+    return FeatureEngineeringPipeline(location_config=location_config)
