@@ -36,8 +36,8 @@ class ImputationService:
     def __init__(
         self,
         small_gap_threshold: int = 9,  # 9
-        select_gap_threshold: int = 72,  # 72  #24
-        chunk_size: int = 73,  # 73 # 25
+        select_gap_threshold: int = 24,  # 72  #24
+        chunk_size: int = 25,  # 73 # 25
         min_obs_for_arima: int = 50,  # mínimo de observaciones no nulas para ajustar ARIMA
         use_fragment_min: bool = True,  # si True, usa mínimo del fragmento; si False, usa 0 como límite
         fragment_selection_strategy: str = "length",  # "length" o "hybrid" (length + completeness + density + sarima_fit)

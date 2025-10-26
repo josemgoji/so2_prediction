@@ -10,6 +10,7 @@ from src.recursos.regressors import LGBMRegressor
 from src.recursos.windows_features import (
     FourierWindowFeatures,
     CustomRollingFeatures,
+    create_default_window_features_generator,
 )
 from src.recursos.scorers import (
     mape_overall_metric_dynamic,  # tuning robusto
@@ -32,7 +33,7 @@ from skforecast.model_selection import (
 from sklearn.preprocessing import FunctionTransformer
 
 # ===== 1) Cargar datos base =====
-df = DataManager().load_data("data/stage/SO2/processed/processed_GIR-EPM.csv")
+df = DataManager().load_data("data/stage/SO2/processed/processed_CEN-TRAF.csv")
 df = df.sort_index()
 # df = df.asfreq("H")  # si necesitas forzar frecuencia horaria fija
 
@@ -40,55 +41,25 @@ df = df.sort_index()
 TARGET_COL = "target"
 
 # ===== 3) Cargar selección desde JSON =====
-feat_sel_path = Path(
-    "data/stage/SO2/selected/lasso/con_exog/selected_cols_CEN-TRAF_lasso_rf.json"
-)
-with open(feat_sel_path, "r", encoding="utf-8") as f:
-    sel = json.load(f)
 
-selected_lags: list[int] = sel["selected_lags"]
-selected_window_features: list[str] = sel["selected_window_features"]
-selected_exog: list[str] = sel.get("selected_exog", [])
-
-missing = [c for c in [TARGET_COL] + selected_exog if c not in df.columns]
-if missing:
-    raise ValueError(f"Faltan columnas en df: {missing}")
 
 # ===== 4) Window features =====
-window_features = [
-    FourierWindowFeatures(period=24, K=3),
-    CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 24, 48, 72]),
-    CustomRollingFeatures(stats=["min"], window_sizes=[6, 24]),
-    CustomRollingFeatures(stats=["max"], window_sizes=[6, 12, 24]),
-]
+window_features = create_default_window_features_generator().get_window_features()
 
 # ===== 5) Split train / val / test =====
 y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainval = (
     split_data_by_dates(
         df=df,
         target_col=TARGET_COL,
-        exog_cols=selected_exog,
+        exog_cols=df.drop(columns="target").columns.tolist(),
         val_months=2,
         test_months=2,
     )
 )
 
-# ===== 6) Escalado robusto y Forecaster recursivo =====
-# Escalado log1p para estabilizar variancia (evita explosión de MAPE si hay outliers)
-TARGET_COL = "target"
-
-y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainval = (
-    split_data_by_dates(
-        df=df,
-        target_col=TARGET_COL,
-        exog_cols=selected_exog,
-        val_months=2,
-        test_months=2,
-    )
-)
 
 # ===== 💡 Cargar archivo de pesos y crear weight_func =====
-weights_path = Path("data/stage/SO2/marks/weights_GIR-EPM.csv")
+weights_path = Path("data/stage/SO2/marks/weights_CEN-TRAF.csv")
 weights = pd.read_csv(weights_path, parse_dates=["datetime"]).set_index("datetime")[
     "weight"
 ]
@@ -105,7 +76,7 @@ def weight_func(index: pd.DatetimeIndex) -> np.ndarray:
 # ===== 6) Forecaster recursivo =====
 forecaster = ForecasterRecursive(
     regressor=LGBMRegressor(random_state=123, verbose=-1),
-    lags=selected_lags,
+    lags=72,
     window_features=window_features,
     weight_func=weight_func,
     transformer_y=FunctionTransformer(
@@ -134,7 +105,7 @@ param_distributions = {
     "min_child_samples": [10, 20, 50],
 }
 
-lags_grid = [selected_lags]
+lags_grid = [np.arange(1, 73)]
 
 results = random_search_forecaster(
     forecaster=forecaster,

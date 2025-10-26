@@ -4,6 +4,7 @@ from pathlib import Path
 from src.services.data_builder import DataBuilderService
 from src.services.outlier_cleaner import DataCleaning
 from src.services.imputation import ImputationService
+from src.utils.gap_marker import save_gap_and_weight_files
 
 
 class DataPipeline:
@@ -40,6 +41,16 @@ class DataPipeline:
 
         # Acceder al DataFrame limpio
         df_clean = result.df
+        
+        ### save gaps
+        save_gap_and_weight_files(
+            df=df_clean,
+            pollutant=pollutant,
+            station=station,
+            stage_dir=self.stage_dir,
+            max_lag=48, 
+            max_roll=72,  
+        )
 
         print(f"DataFrame limpio: {df_clean.info()}")
 
