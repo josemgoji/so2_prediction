@@ -140,7 +140,7 @@ FEATURE_SELECTION_CONFIG = {
 
 # Configuración de ejecución del pipeline (usado en run_feature_selection.py)
 FEATURE_SELECTION_RUN_CONFIG = {
-    "include_exog": False,
+    "include_exog": True,
     "select_only": None,
     "force_inclusion": None,
     "subsample": 0.5,
