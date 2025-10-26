@@ -51,6 +51,17 @@ class DataManager:
         df = df.sort_values(date_col)
         df.set_index(date_col, inplace=True)
 
+        # Establecer frecuencia si no está definida
+        if df.index.freq is None:
+            # Inferir frecuencia automáticamente
+            inferred_freq = pd.infer_freq(df.index)
+            if inferred_freq is not None:
+                df.index.freq = inferred_freq
+            else:
+                # No aplicar asfreq automáticamente para evitar introducir NaN
+                # La frecuencia se establecerá cuando sea necesario en el pipeline
+                pass
+
         return df
 
     def load_target(
@@ -99,6 +110,17 @@ class DataManager:
         # Ordenar por fecha y establecer datetime como índice
         df = df.sort_values("datetime")
         df.set_index("datetime", inplace=True)
+
+        # Establecer frecuencia si no está definida
+        if df.index.freq is None:
+            # Inferir frecuencia automáticamente
+            inferred_freq = pd.infer_freq(df.index)
+            if inferred_freq is not None:
+                df.index.freq = inferred_freq
+            else:
+                # No aplicar asfreq automáticamente para evitar introducir NaN
+                # La frecuencia se establecerá cuando sea necesario en el pipeline
+                pass
 
         return df
 
@@ -177,6 +199,17 @@ class DataManager:
         # Convertir datetime y establecer como índice
         df["datetime"] = pd.to_datetime(df["datetime"])
         df.set_index("datetime", inplace=True)
+
+        # Establecer frecuencia si no está definida
+        if df.index.freq is None:
+            # Inferir frecuencia automáticamente
+            inferred_freq = pd.infer_freq(df.index)
+            if inferred_freq is not None:
+                df.index.freq = inferred_freq
+            else:
+                # No aplicar asfreq automáticamente para evitar introducir NaN
+                # La frecuencia se establecerá cuando sea necesario en el pipeline
+                pass
 
         # Convertir todas las columnas a numérico
         df = df.apply(pd.to_numeric, errors="coerce")

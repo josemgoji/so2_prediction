@@ -73,21 +73,21 @@ class FeatureEngineeringPipeline:
         pd.DataFrame
             DataFrame cargado con datetime como índice
         """
-        print(f"🔧 Cargando datos desde: {file_path}")
+        print(f"Cargando datos desde: {file_path}")
 
         # Cargar datos usando DataManager
         self.raw_data = self.data_manager.load_data(file_path)
 
         print(
-            f"✅ Datos cargados: {len(self.raw_data)} filas, {len(self.raw_data.columns)} columnas"
+            f"Datos cargados: {len(self.raw_data)} filas, {len(self.raw_data.columns)} columnas"
         )
         print(
-            f"📅 Rango de fechas: {self.raw_data.index.min()} a {self.raw_data.index.max()}"
+            f"Rango de fechas: {self.raw_data.index.min()} a {self.raw_data.index.max()}"
         )
-        print(f"📊 Columnas disponibles: {list(self.raw_data.columns)}")
+        print(f"Columnas disponibles: {list(self.raw_data.columns)}")
 
         # Mostrar estadísticas básicas
-        print("\n📈 Estadísticas básicas:")
+        print("\nEstadisticas basicas:")
         print("   - Valores faltantes por columna:")
         for col in self.raw_data.columns:
             missing = self.raw_data[col].isnull().sum()
@@ -131,7 +131,7 @@ class FeatureEngineeringPipeline:
             raise ValueError("No hay datos cargados. Ejecuta load_data() primero.")
 
         print("\n" + "=" * 60)
-        print("🧪 CREANDO CARACTERÍSTICAS DE FEATURE ENGINEERING")
+        print("CREANDO CARACTERISTICAS DE FEATURE ENGINEERING")
         print("=" * 60)
 
         # Usar valores por defecto si no se especifican
@@ -140,12 +140,12 @@ class FeatureEngineeringPipeline:
         temp_functions = temp_functions or DEFAULT_TEMP_FUNCTIONS
 
         print(
-            f"📍 Ubicación configurada: {self.feature_engineering.location_config['name']}"
+            f"Ubicacion configurada: {self.feature_engineering.location_config['name']}"
         )
-        print(f"📅 Características de calendario: {calendar_features}")
-        print(f"🌡️ Columnas de temperatura: {temp_columns}")
-        print(f"⏰ Ventanas de temperatura: {temp_windows}")
-        print(f"📊 Funciones de temperatura: {temp_functions}")
+        print(f"Caracteristicas de calendario: {calendar_features}")
+        print(f"Columnas de temperatura: {temp_columns}")
+        print(f"Ventanas de temperatura: {temp_windows}")
+        print(f"Funciones de temperatura: {temp_functions}")
 
         # Crear todas las características usando FeatureEngineering
         self.feature_engineering_result = self.feature_engineering.create_all_features(
@@ -159,9 +159,9 @@ class FeatureEngineeringPipeline:
         )
 
         print(
-            f"✅ Características de Feature Engineering creadas: {list(self.feature_engineering_result.columns)}"
+            f"Caracteristicas de Feature Engineering creadas: {list(self.feature_engineering_result.columns)}"
         )
-        print(f"📊 Shape: {self.feature_engineering_result.shape}")
+        print(f"Shape: {self.feature_engineering_result.shape}")
 
         return self.feature_engineering_result
 
@@ -200,7 +200,7 @@ class FeatureEngineeringPipeline:
         dict
             Diccionario con todos los resultados del pipeline
         """
-        print("🚀 INICIANDO PIPELINE COMPLETO DE FEATURE ENGINEERING")
+        print("INICIANDO PIPELINE COMPLETO DE FEATURE ENGINEERING")
         print("=" * 60)
 
         try:
@@ -231,18 +231,18 @@ class FeatureEngineeringPipeline:
             }
 
             print("\n" + "=" * 60)
-            print("✅ PIPELINE COMPLETADO EXITOSAMENTE")
+            print("PIPELINE COMPLETADO EXITOSAMENTE")
             print("=" * 60)
-            print(f"📊 Datos originales: {raw_data.shape}")
+            print(f"Datos originales: {raw_data.shape}")
             print(
-                f"📊 Características de Feature Engineering: {feature_engineering_result.shape}"
+                f"Caracteristicas de Feature Engineering: {feature_engineering_result.shape}"
             )
-            print(f"📊 Datos procesados finales: {self.processed_data.shape}")
+            print(f"Datos procesados finales: {self.processed_data.shape}")
 
             return results
 
         except Exception as e:
-            print(f"\n❌ ERROR DURANTE EL PIPELINE: {str(e)}")
+            print(f"\nERROR DURANTE EL PIPELINE: {str(e)}")
             import traceback
 
             traceback.print_exc()
@@ -267,18 +267,18 @@ class FeatureEngineeringPipeline:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        print(f"💾 Guardando resultados en: {output_path}")
+        print(f"Guardando resultados en: {output_path}")
 
         # Guardar datos procesados
         processed_path = output_path.with_suffix(".csv")
         self.data_manager.save(self.processed_data, str(processed_path))
-        print(f"✅ Datos procesados guardados en: {processed_path}")
+        print(f"Datos procesados guardados en: {processed_path}")
 
         # Guardar datos originales si se solicita
         if include_raw and self.raw_data is not None:
             raw_path = output_path.with_name(f"{output_path.stem}_raw.csv")
             self.data_manager.save(self.raw_data, str(raw_path))
-            print(f"✅ Datos originales guardados en: {raw_path}")
+            print(f"Datos originales guardados en: {raw_path}")
 
     def get_summary(self) -> Dict[str, Any]:
         """

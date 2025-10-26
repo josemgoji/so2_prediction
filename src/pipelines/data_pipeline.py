@@ -14,7 +14,8 @@ class DataPipeline:
         self.imputer = ImputationService()
 
     def run(self, pollutant: str, station: str, pollutant_path, meteo_path):
-        df = self.dm.load(
+        # Cargar datos SIN aplicar asfreq todavía
+        df_raw = self.dm.load_without_freq(
             target_col=station,
             pollutant_path=pollutant_path,
             meteo_path=meteo_path,
@@ -26,14 +27,19 @@ class DataPipeline:
         merged_folder_path = STAGE_DIR / f"{pollutant}/merged/"
         os.makedirs(merged_folder_path, exist_ok=True)
         self.dm.data_resource.save(
-            df, file_path=merged_folder_path / f"merged_{station}.csv"
+            df_raw, file_path=merged_folder_path / f"merged_{station}.csv"
         )
         print(
             f"DataFrame completo guardado en: {merged_folder_path / f'merged_{station}.csv'}"
         )
 
+        # Aplicar asfreq("h") ANTES de la limpieza para mantener frecuencia regular
+        df_with_freq = df_raw.asfreq("h")
+        print(f"DataFrame con frecuencia 'h' aplicada: {df_with_freq.shape}")
+        print(f"Valores nulos después de asfreq: {df_with_freq.isnull().sum().sum()}")
+
         # Limpiar los datos y obtener el resultado
-        result = self.cleaner.clean_data(df)
+        result = self.cleaner.clean_data(df_with_freq)
 
         # Acceder al DataFrame limpio
         df_clean = result.df
