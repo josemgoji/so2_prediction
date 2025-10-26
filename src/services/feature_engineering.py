@@ -11,12 +11,8 @@ from feature_engine.timeseries.forecasting import WindowFeatures
 from ..constants.parsed_fields import (
     LOCATION_CONFIG,
     DEFAULT_CALENDAR_FEATURES,
-    DEFAULT_TEMP_COLUMNS,
-    DEFAULT_TEMP_WINDOWS,
-    DEFAULT_TEMP_FUNCTIONS,
     DEFAULT_TRIM_START,
     DEFAULT_TRIM_END,
-    EXOGENOUS_WINDOW_FEATURES,
 )
 
 

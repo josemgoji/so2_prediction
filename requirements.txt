@@ -6,6 +6,8 @@ scikit-learn>=1.0.0
 # Machine Learning
 lightgbm>=3.3.0
 optuna>=3.0.0
+skforecast>=0.10.0
+xgboost>=1.6.0
 
 # Deep Learning
 tensorflow>=2.10.0
@@ -17,5 +19,8 @@ seaborn>=0.11.0
 
 # Data processing
 scipy>=1.7.0
+feature-engine>=1.6.0
+astral>=3.2
+statsmodels>=0.13.0
 
 

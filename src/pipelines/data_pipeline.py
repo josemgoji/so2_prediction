@@ -1,13 +1,13 @@
 import os
+import pandas as pd
 from pathlib import Path
 from src.services.data_builder import DataBuilderService
-
 from src.services.outlier_cleaner import DataCleaning
 from src.services.imputation import ImputationService
 from src.constants.parsed_fields import STAGE_DIR
 
 
-class PreprocessingPipeline:
+class DataPipeline:
     def __init__(self):
         self.dm = DataBuilderService()
         self.cleaner = DataCleaning(contamination=0.01, random_state=42)
@@ -20,7 +20,7 @@ class PreprocessingPipeline:
             meteo_path=meteo_path,
             stage_dir=STAGE_DIR,
             pollutant_name=pollutant,
-        ) 
+        )
 
         # Guardar el DataFrame completo (target + exógenas) para trazabilidad
         merged_folder_path = STAGE_DIR / f"{pollutant}/merged/"
@@ -93,4 +93,22 @@ class PreprocessingPipeline:
         os.makedirs(folder_path, exist_ok=True)
 
         # Guardar el DataFrame imputado
-        self.dm.save(df_imputed, path=folder_path / f"{station}.csv")
+        self.dm.data_resource.save(df_imputed, file_path=folder_path / f"{station}.csv")
+
+        return df_imputed
+
+    def save(self, df: pd.DataFrame, output_path: str = None) -> None:
+        """
+        Guarda el DataFrame en la ruta especificada.
+        """
+        if output_path is None:
+            # Usar la ruta por defecto
+            output_path = str(STAGE_DIR / "SO2/clean/")
+
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Resetear índice para guardar como CSV
+        df_to_save = df.reset_index()
+        df_to_save.to_csv(output_file, index=False)
+        print(f"Saved data: {output_file}")
