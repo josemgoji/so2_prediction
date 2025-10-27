@@ -137,6 +137,12 @@ class FeatureEngineeringPipeline:
         else:
             print("[INFO] No hay NaNs en columnas originales.")
 
+        exog_cols = [c for c in raw_with_patch.columns if c != "target"]
+        if exog_cols:
+            print(f"[INFO] Aplicando shift de 1h a exógenas: {exog_cols}")
+            raw_with_patch[exog_cols] = raw_with_patch[exog_cols].shift(1)
+            raw_with_patch = raw_with_patch.dropna() 
+
         # -------------------------------------------------
         # Crear engineered features (con freq fija 'h')
         # -------------------------------------------------

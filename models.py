@@ -6,14 +6,19 @@ import numpy as np
 import pandas as pd
 
 from src.recursos.data_manager import DataManager
-from src.recursos.regressors import LGBMRegressor
+from src.recursos.regressors import (
+    create_lgbm_regressor,
+    create_xgb_regressor,
+    create_rf_regressor,
+    create_lasso_regressor,
+)
 from src.recursos.windows_features import (
     FourierWindowFeatures,
     CustomRollingFeatures,
 )
 from src.recursos.scorers import (
     mape_overall_metric_dynamic,  # tuning robusto
-    mape_safe,  # clásico (para referencia)
+    mape_safe,
     wmape,
     rmse,
     stepwise_mape_from_backtesting,
@@ -30,11 +35,20 @@ from skforecast.model_selection import (
 )
 
 from sklearn.preprocessing import FunctionTransformer
+from src.constants.parsed_fields import (
+    FEATURE_SELECTION_CONFIG,
+    REGRESSORS_CONFIG,
+    MODEL_RESULTS_CONFIG,
+)
 
 # ===== 💡 Configuración de estación =====
-STATION = "GIR-EPM"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
+STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
 
-print(f"🚀 Ejecutando modelo para la estación: {STATION}")
+print(f"🚀 Ejecutando modelos para la estación: {STATION}")
+
+# ===== 💡 Configuración de regresores =====
+# Los regresores se cargan desde parsed_fields.py
+USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
 
 # ===== 1) Cargar datos base =====
 df = DataManager().load_data(f"data/stage/SO2/processed/processed_{STATION}.csv")
@@ -110,22 +124,7 @@ if USE_WEIGHTS:
 else:
     weight_func = None
 
-# ===== 6) Forecaster recursivo =====
-forecaster_params = {
-    "regressor": LGBMRegressor(random_state=123, verbose=-1),
-    "lags": selected_lags,
-    "window_features": window_features,
-    "transformer_y": FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
-}
-
-# Solo agregar weight_func si está habilitado
-if USE_WEIGHTS:
-    forecaster_params["weight_func"] = weight_func
-
-forecaster = ForecasterRecursive(**forecaster_params)
-
-# ===== 7) Backtesting + Random Search (tuning robusto) =====
-
+# ===== 6) Configuración común para todos los regresores =====
 H = 1  # horizonte 1 paso
 cv = TimeSeriesFold(
     steps=H,
@@ -133,65 +132,240 @@ cv = TimeSeriesFold(
     refit=False,
 )
 
-# Param grid más amplio
-param_distributions = {
-    "n_estimators": [200, 400, 800],
-    "max_depth": [5, 10, 15, 20],
-    "learning_rate": [0.1, 0.05, 0.01],
-    "num_leaves": [31, 63, 127],
-    "subsample": [0.8, 1.0],
-    "colsample_bytree": [0.8, 1.0],
-    "min_child_samples": [10, 20, 50],
-}
-
 lags_grid = [selected_lags]
 
-results = random_search_forecaster(
-    forecaster=forecaster,
-    y=y_trainval,
-    exog=exog_trainval,
-    param_distributions=param_distributions,
-    lags_grid=lags_grid,
-    cv=cv,
-    metric=wmape,  # <-- métrica robusta
-    n_iter=20,  # probar 20 combinaciones aleatorias
-    random_state=123,
-    return_best=True,
-    n_jobs="auto",
-    verbose=False,
-    show_progress=True,
+# ===== 7) Iterar sobre diferentes regresores =====
+all_results = []
+
+# Crear directorio de resultados si no existe
+results_dir = (
+    Path(MODEL_RESULTS_CONFIG["analytics_dir"]) / MODEL_RESULTS_CONFIG["results_subdir"]
 )
-print("Resultados Random Search (top 5):")
-print(results.head())
+results_dir.mkdir(parents=True, exist_ok=True)
 
-# ===== 7.1) Validación post-hoc (train+val): métricas robustas =====
-metric_vals_tv, preds_tv = backtesting_forecaster(
-    forecaster=forecaster,
-    y=y_trainval,
-    exog=exog_trainval,
-    cv=cv,
-    metric=wmape,
-    return_predictors=False,
-    n_jobs="auto",
-    verbose=False,
-    show_progress=False,
+# Determinar subdirectorio basado en configuración
+exog_status = "con_exog" if USE_EXOG else "sin_exog"
+station_results_dir = results_dir / STATION / exog_status
+station_results_dir.mkdir(parents=True, exist_ok=True)
+
+for regressor_config in REGRESSORS_CONFIG:
+    regressor_name = regressor_config["name"]
+    regressor_func_name = regressor_config["regressor_func"]
+    param_distributions = regressor_config["params"]
+
+    # Mapear nombre de función a función real
+    regressor_func_map = {
+        "create_lgbm_regressor": create_lgbm_regressor,
+        "create_xgb_regressor": create_xgb_regressor,
+        "create_rf_regressor": create_rf_regressor,
+        "create_lasso_regressor": create_lasso_regressor,
+    }
+
+    regressor_func = regressor_func_map[regressor_func_name]
+
+    print(f"\n{'=' * 60}")
+    print(f"🚀 Entrenando modelo: {regressor_name}")
+    print(f"{'=' * 60}")
+
+    # Crear regressor base con parámetros por defecto
+    base_regressor = regressor_func(
+        random_state=FEATURE_SELECTION_CONFIG["random_state"]
+    )
+
+    # ===== Forecaster recursivo =====
+    forecaster_params = {
+        "regressor": base_regressor,
+        "lags": selected_lags,
+        "window_features": window_features,
+        "transformer_y": FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
+    }
+
+    # Solo agregar weight_func si está habilitado
+    if USE_WEIGHTS:
+        forecaster_params["weight_func"] = weight_func
+
+    forecaster = ForecasterRecursive(**forecaster_params)
+
+    # ===== Random Search =====
+    try:
+        results = random_search_forecaster(
+            forecaster=forecaster,
+            y=y_trainval,
+            exog=exog_trainval,
+            param_distributions=param_distributions,
+            lags_grid=lags_grid,
+            cv=cv,
+            metric=wmape,
+            n_iter=10,  # Aumentado para mejor tuning
+            random_state=FEATURE_SELECTION_CONFIG["random_state"],
+            return_best=True,
+            n_jobs=-1,
+            verbose=False,
+            show_progress=True,
+        )
+
+        print(f"\n📊 Resultados Random Search para {regressor_name}:")
+        print(results.head())
+
+        # ===== Validación post-hoc (train+val) =====
+        metric_vals_tv, preds_tv = backtesting_forecaster(
+            forecaster=forecaster,
+            y=y_trainval,
+            exog=exog_trainval,
+            cv=cv,
+            metric=wmape,
+            return_predictors=False,
+            n_jobs=-1,
+            verbose=False,
+            show_progress=False,
+        )
+
+        mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
+        rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
+
+        # Calcular stepwise MAPE para validación
+        stepwise_mape_val = stepwise_mape_from_backtesting(
+            preds_tv, y_trainval.loc[preds_tv.index]
+        )
+
+        print(f"\n📈 Validación (train+val) - {regressor_name}:")
+        print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
+        print(f"RMSE: {rmse_tv:.4f}")
+        print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
+
+        # ===== Evaluación en test =====
+        forecaster.fit(y=y_trainval, exog=exog_trainval)
+        y_pred = forecaster.predict(steps=len(y_test), exog=exog_test)
+
+        test_rmse = rmse(y_test, y_pred)
+        test_wmape = wmape(y_test, y_pred)
+
+        # Calcular stepwise MAPE para test
+        stepwise_mape_test = stepwise_mape_on_test(y_test, y_pred, H=H)
+
+        print(f"\n🎯 Test - {regressor_name}:")
+        print(f"RMSE: {test_rmse:.4f}")
+        print(f"WMAPE %: {100 * test_wmape:.2f}")
+        print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
+
+        # Preparar datos para guardar
+        result_data = {
+            "station": STATION,
+            "model_type": regressor_name,
+            "use_exog": USE_EXOG,
+            "use_weights": USE_WEIGHTS,
+            "validation_metrics": {
+                "wmape": float(mape_overall_tv),
+                "rmse": float(rmse_tv),
+                "stepwise_mape": stepwise_mape_val.to_dict(),
+            },
+            "test_metrics": {
+                "wmape": float(test_wmape),
+                "rmse": float(test_rmse),
+                "stepwise_mape": stepwise_mape_test.to_dict(),
+            },
+            "best_params": results.iloc[0].to_dict() if len(results) > 0 else {},
+            "timestamp": pd.Timestamp.now().isoformat(),
+        }
+
+        # Guardar resultados individuales
+        timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        result_file = station_results_dir / f"{regressor_name}_{timestamp_str}.json"
+
+        with open(result_file, "w", encoding="utf-8") as f:
+            json.dump(result_data, f, indent=2, ensure_ascii=False)
+
+        print(f"💾 Resultados guardados en: {result_file}")
+
+        # Guardar resultados para comparación
+        all_results.append(
+            {
+                "regressor": regressor_name,
+                "val_wmape": mape_overall_tv,
+                "val_rmse": rmse_tv,
+                "val_stepwise_mape": stepwise_mape_val.to_dict(),
+                "test_wmape": test_wmape,
+                "test_rmse": test_rmse,
+                "test_stepwise_mape": stepwise_mape_test.to_dict(),
+                "best_params": results.iloc[0].to_dict() if len(results) > 0 else {},
+            }
+        )
+
+    except Exception as e:
+        print(f"❌ Error entrenando {regressor_name}: {str(e)}")
+        all_results.append(
+            {
+                "regressor": regressor_name,
+                "val_wmape": float("inf"),
+                "val_rmse": float("inf"),
+                "val_stepwise_mape": {},
+                "test_wmape": float("inf"),
+                "test_rmse": float("inf"),
+                "test_stepwise_mape": {},
+                "best_params": {},
+                "error": str(e),
+            }
+        )
+
+# ===== 8) Resumen de resultados =====
+print(f"\n{'=' * 80}")
+print(f"📋 RESUMEN DE RESULTADOS PARA ESTACIÓN: {STATION}")
+print(
+    f"🔧 Configuración: {'Con exógenas' if USE_EXOG else 'Sin exógenas'}, {'Con pesos' if USE_WEIGHTS else 'Sin pesos'}"
 )
+print(f"{'=' * 80}")
 
+results_df = pd.DataFrame(all_results)
+results_df = results_df.sort_values("test_wmape")
 
-mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
+print("\n🏆 RANKING POR TEST WMAPE:")
+for i, (_, row) in enumerate(results_df.iterrows(), 1):
+    if row["test_wmape"] != float("inf"):
+        print(
+            f"{i}. {row['regressor']}: WMAPE = {100 * row['test_wmape']:.2f}%, RMSE = {row['test_rmse']:.4f}"
+        )
+        # Mostrar stepwise MAPE para el mejor modelo
+        if i == 1:
+            print(f"   Stepwise MAPE Test: {row['test_stepwise_mape']}")
+    else:
+        print(f"{i}. {row['regressor']}: ERROR - {row.get('error', 'Unknown error')}")
 
-print("\nValidación (train+val) [unscaled]:")
-print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
-print(f"RMSE: {rmse_tv:.4f}")
+print(f"\n🥇 MEJOR MODELO: {results_df.iloc[0]['regressor']}")
+print(f"Test WMAPE: {100 * results_df.iloc[0]['test_wmape']:.2f}%")
+print(f"Test RMSE: {results_df.iloc[0]['test_rmse']:.4f}")
+print(f"Test Stepwise MAPE: {results_df.iloc[0]['test_stepwise_mape']}")
 
-# ===== 8) Fit final (train+val) y evaluación en test =====
-forecaster.fit(y=y_trainval, exog=exog_trainval)
-y_pred = forecaster.predict(steps=len(y_test), exog=exog_test)
+# ===== 9) Guardar resumen completo =====
+summary_data = {
+    "station": STATION,
+    "configuration": {
+        "use_exog": USE_EXOG,
+        "use_weights": USE_WEIGHTS,
+        "timestamp": pd.Timestamp.now().isoformat(),
+    },
+    "results_summary": results_df.to_dict("records"),
+    "best_model": {
+        "name": results_df.iloc[0]["regressor"],
+        "test_wmape": float(results_df.iloc[0]["test_wmape"]),
+        "test_rmse": float(results_df.iloc[0]["test_rmse"]),
+        "test_stepwise_mape": results_df.iloc[0]["test_stepwise_mape"],
+        "val_stepwise_mape": results_df.iloc[0]["val_stepwise_mape"],
+        "best_params": results_df.iloc[0]["best_params"],
+    },
+}
 
-test_rmse = rmse(y_test, y_pred)
-test_wmape = wmape(y_test, y_pred)
+# Guardar resumen completo
+timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+summary_file = station_results_dir / f"summary_{timestamp_str}.json"
 
-print("\nTest [unscaled]:")
-print(f"RMSE: {test_rmse:.4f}")
-print(f"WMAPE %: {100 * test_wmape:.2f}")
+with open(summary_file, "w", encoding="utf-8") as f:
+    json.dump(summary_data, f, indent=2, ensure_ascii=False)
+
+print(f"\n💾 Resumen completo guardado en: {summary_file}")
+
+# Guardar también como CSV para fácil análisis
+csv_file = station_results_dir / f"results_comparison_{timestamp_str}.csv"
+results_df.to_csv(csv_file, index=False)
+print(f"📊 Comparación en CSV guardada en: {csv_file}")
+
+print(f"\n✅ Proceso completado para estación {STATION}")
