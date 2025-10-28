@@ -98,7 +98,7 @@ forecaster = ForecasterRecursive(**forecaster_params)
 
 # ===== 7) Backtesting + Random Search (tuning robusto) =====
 
-H = 1  # horizonte 1 paso
+H = 12  # horizonte 1 paso
 cv = TimeSeriesFold(
     steps=H,
     initial_train_size=len(y_train),

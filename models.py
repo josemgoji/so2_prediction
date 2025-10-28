@@ -1,5 +1,6 @@
 # --- imports
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,7 @@ from src.recursos.windows_features import (
     CustomRollingFeatures,
 )
 from src.recursos.scorers import (
-    mape_overall_metric_dynamic,  # tuning robusto
+    mape_overall_metric_dynamic,
     mape_safe,
     wmape,
     rmse,
@@ -25,6 +26,7 @@ from src.recursos.scorers import (
     stepwise_mape_on_test,
 )
 from src.utils.data_splitter import split_data_by_dates
+from src.utils.plot_utils import create_prediction_plots
 
 from skforecast.recursive import ForecasterRecursive
 from skforecast.model_selection import (
@@ -40,6 +42,25 @@ from src.constants.parsed_fields import (
     REGRESSORS_CONFIG,
     MODEL_RESULTS_CONFIG,
 )
+
+
+def clean_params_for_json(params_dict):
+    """Convierte parámetros a tipos serializables en JSON"""
+    cleaned = {}
+    for key, value in params_dict.items():
+        if isinstance(value, (np.integer, np.floating)):
+            cleaned[key] = value.item()
+        elif isinstance(value, np.ndarray):
+            cleaned[key] = value.tolist()
+        elif isinstance(value, (list, tuple)):
+            cleaned[key] = [
+                v.item() if isinstance(v, (np.integer, np.floating)) else v
+                for v in value
+            ]
+        else:
+            cleaned[key] = value
+    return cleaned
+
 
 # ===== 💡 Configuración de estación =====
 STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
@@ -125,14 +146,14 @@ else:
     weight_func = None
 
 # ===== 6) Configuración común para todos los regresores =====
-H = 1  # horizonte 1 paso
+H = 6  # horizonte 1 paso
 cv = TimeSeriesFold(
     steps=H,
     initial_train_size=len(y_train),
     refit=False,
 )
 
-lags_grid = [selected_lags]
+# lags_grid = [selected_lags]
 
 # ===== 7) Iterar sobre diferentes regresores =====
 all_results = []
@@ -193,7 +214,7 @@ for regressor_config in REGRESSORS_CONFIG:
             y=y_trainval,
             exog=exog_trainval,
             param_distributions=param_distributions,
-            lags_grid=lags_grid,
+            # lags_grid=lags_grid,
             cv=cv,
             metric=wmape,
             n_iter=10,  # Aumentado para mejor tuning
@@ -207,6 +228,29 @@ for regressor_config in REGRESSORS_CONFIG:
         print(f"\n📊 Resultados Random Search para {regressor_name}:")
         print(results.head())
 
+        # Extraer mejor parámetros correctamente
+        if len(results) > 0:
+            best_params = results.iloc[0].to_dict()
+            # Remover columnas que no son parámetros del modelo
+            params_to_remove = ["metric", "metric_std", "metric_mean"]
+            best_params = {
+                k: v for k, v in best_params.items() if k not in params_to_remove
+            }
+
+            # Manejar específicamente el parámetro 'lags' que puede ser problemático
+            if "lags" in best_params:
+                lags_value = best_params["lags"]
+                if hasattr(lags_value, "tolist"):
+                    best_params["lags"] = lags_value.tolist()
+                elif isinstance(lags_value, np.ndarray):
+                    best_params["lags"] = lags_value.tolist()
+                else:
+                    best_params["lags"] = str(
+                        lags_value
+                    )  # Convertir a string si es necesario
+        else:
+            best_params = {}
+
         # ===== Validación post-hoc (train+val) =====
         metric_vals_tv, preds_tv = backtesting_forecaster(
             forecaster=forecaster,
@@ -214,7 +258,7 @@ for regressor_config in REGRESSORS_CONFIG:
             exog=exog_trainval,
             cv=cv,
             metric=wmape,
-            return_predictors=False,
+            return_predictors=True,
             n_jobs=-1,
             verbose=False,
             show_progress=False,
@@ -248,6 +292,34 @@ for regressor_config in REGRESSORS_CONFIG:
         print(f"WMAPE %: {100 * test_wmape:.2f}")
         print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
 
+        # ===== Crear gráficos de predicciones =====
+        try:
+            plot_files = create_prediction_plots(
+                y_val=y_val,
+                preds_val=preds_tv.loc[y_val.index]
+                if len(preds_tv) > 0
+                else pd.DataFrame(),
+                y_test=y_test,
+                y_pred_test=y_pred,
+                model_name=regressor_name,
+                station=STATION,
+                save_dir=station_results_dir,
+            )
+            print(f"📊 Gráficos creados exitosamente para {regressor_name}")
+        except Exception as e:
+            print(f"⚠️ Error creando gráficos para {regressor_name}: {str(e)}")
+            plot_files = {}
+
+        # ===== Guardar modelo entrenado =====
+        timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        model_file = station_results_dir / f"{regressor_name}_model_{timestamp_str}.pkl"
+
+        # Guardar el forecaster entrenado
+        with open(model_file, "wb") as f:
+            pickle.dump(forecaster, f)
+
+        print(f"💾 Modelo entrenado guardado en: {model_file}")
+
         # Preparar datos para guardar
         result_data = {
             "station": STATION,
@@ -264,7 +336,9 @@ for regressor_config in REGRESSORS_CONFIG:
                 "rmse": float(test_rmse),
                 "stepwise_mape": stepwise_mape_test.to_dict(),
             },
-            "best_params": results.iloc[0].to_dict() if len(results) > 0 else {},
+            "best_params": clean_params_for_json(best_params),
+            "model_file": str(model_file),
+            "plot_files": plot_files,
             "timestamp": pd.Timestamp.now().isoformat(),
         }
 
@@ -287,7 +361,9 @@ for regressor_config in REGRESSORS_CONFIG:
                 "test_wmape": test_wmape,
                 "test_rmse": test_rmse,
                 "test_stepwise_mape": stepwise_mape_test.to_dict(),
-                "best_params": results.iloc[0].to_dict() if len(results) > 0 else {},
+                "best_params": clean_params_for_json(best_params),
+                "model_file": str(model_file),
+                "plot_files": plot_files,
             }
         )
 
@@ -303,6 +379,8 @@ for regressor_config in REGRESSORS_CONFIG:
                 "test_rmse": float("inf"),
                 "test_stepwise_mape": {},
                 "best_params": {},
+                "model_file": None,
+                "plot_files": {},
                 "error": str(e),
             }
         )
@@ -334,6 +412,11 @@ print(f"\n🥇 MEJOR MODELO: {results_df.iloc[0]['regressor']}")
 print(f"Test WMAPE: {100 * results_df.iloc[0]['test_wmape']:.2f}%")
 print(f"Test RMSE: {results_df.iloc[0]['test_rmse']:.4f}")
 print(f"Test Stepwise MAPE: {results_df.iloc[0]['test_stepwise_mape']}")
+print(f"Modelo guardado en: {results_df.iloc[0]['model_file']}")
+if results_df.iloc[0]["plot_files"]:
+    print("📊 Gráficos guardados:")
+    for plot_type, plot_path in results_df.iloc[0]["plot_files"].items():
+        print(f"   {plot_type}: {plot_path}")
 
 # ===== 9) Guardar resumen completo =====
 summary_data = {
@@ -350,7 +433,9 @@ summary_data = {
         "test_rmse": float(results_df.iloc[0]["test_rmse"]),
         "test_stepwise_mape": results_df.iloc[0]["test_stepwise_mape"],
         "val_stepwise_mape": results_df.iloc[0]["val_stepwise_mape"],
-        "best_params": results_df.iloc[0]["best_params"],
+        "best_params": clean_params_for_json(results_df.iloc[0]["best_params"]),
+        "model_file": results_df.iloc[0]["model_file"],
+        "plot_files": results_df.iloc[0]["plot_files"],
     },
 }
 
