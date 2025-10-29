@@ -82,47 +82,45 @@ class FeatureEngineering:
         )
         return solar
 
-    def extract_temperature_features(
+    def extract_window_features(
         self,
         data: pd.DataFrame,
-        temp_columns: List[str] = None,
+        columns: List[str] = None,
         windows: List[str] = None,
         functions: List[str] = None,
         freq: str = "h",  # fija
     ) -> pd.DataFrame:
         # Validación columnas
-        missing = [c for c in (temp_columns or []) if c not in data.columns]
+        missing = [c for c in (columns or []) if c not in data.columns]
         if missing:
             raise ValueError(f"Las siguientes columnas no existen en 'data': {missing}")
 
         wf = WindowFeatures(
-            variables=temp_columns,
+            variables=columns,
             window=windows,
             functions=functions,
-            freq=freq,  # siempre 'h'
+            freq=freq,
         )
-        return wf.fit_transform(data[temp_columns])
+        return wf.fit_transform(data[columns])
 
     def combine_exogenous_features(
         self,
         calendar_features: pd.DataFrame,
         solar_features: pd.DataFrame,
-        temperature_features: pd.DataFrame,
+        window_features: pd.DataFrame,
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
     ) -> pd.DataFrame:
         # El trimming se aplica en el pipeline para mantener consistencia con crudos
-        return pd.concat(
-            [calendar_features, solar_features, temperature_features], axis=1
-        )
+        return pd.concat([calendar_features, solar_features, window_features], axis=1)
 
     def create_all_features(
         self,
         data: pd.DataFrame,
         calendar_features: List[str] = None,
-        temp_columns: List[str] = None,
-        temp_windows: List[str] = None,
-        temp_functions: List[str] = None,
+        window_columns: List[str] = None,
+        window_windows: List[str] = None,
+        window_functions: List[str] = None,
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
         freq: str = "h",  # fija
@@ -130,13 +128,13 @@ class FeatureEngineering:
         # Extraer cada bloque
         cal_vars = self.extract_calendar_features(data, calendar_features)
         solar_vars = self.extract_solar_features(data)
-        temp_vars = self.extract_temperature_features(
+        window_vars = self.extract_window_features(
             data=data,
-            temp_columns=temp_columns,
-            windows=temp_windows,
-            functions=temp_functions,
+            columns=window_columns,
+            windows=window_windows,
+            functions=window_functions,
             freq=freq,  # siempre 'h'
         )
         return self.combine_exogenous_features(
-            cal_vars, solar_vars, temp_vars, trim_start, trim_end
+            cal_vars, solar_vars, window_vars, trim_start, trim_end
         )

@@ -18,6 +18,8 @@ from src.recursos.windows_features import (
     CustomRollingFeatures,
 )
 from src.recursos.scorers import (
+    mape_overall_metric_dynamic,
+    mape_safe,
     wmape,
     rmse,
     stepwise_mape_from_backtesting,
@@ -26,9 +28,10 @@ from src.recursos.scorers import (
 from src.utils.data_splitter import split_data_by_dates
 from src.utils.plot_utils import create_prediction_plots
 
-from skforecast.recursive import ForecasterRecursive
+from skforecast.direct import ForecasterDirect
 from skforecast.model_selection import (
     TimeSeriesFold,
+    grid_search_forecaster,
     random_search_forecaster,
     backtesting_forecaster,
 )
@@ -62,7 +65,7 @@ def clean_params_for_json(params_dict):
 # ===== 💡 Configuración de estación =====
 STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
 
-print(f"🚀 Ejecutando modelos para la estación: {STATION}")
+print(f"🚀 Ejecutando modelos (Direct) para la estación: {STATION}")
 
 # ===== 💡 Configuración de regresores =====
 # Los regresores se cargan desde parsed_fields.py
@@ -109,20 +112,6 @@ y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainv
     )
 )
 
-# ===== 6) Escalado robusto y Forecaster recursivo =====
-# Escalado log1p para estabilizar variancia (evita explosión de MAPE si hay outliers)
-TARGET_COL = "target"
-
-y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainval = (
-    split_data_by_dates(
-        df=df,
-        target_col=TARGET_COL,
-        exog_cols=selected_exog,
-        val_months=2,
-        test_months=2,
-    )
-)
-
 # ===== 💡 Control de pesos para gaps =====
 USE_WEIGHTS = True  # Cambiar a False para desactivar los pesos de gaps
 
@@ -143,14 +132,12 @@ else:
     weight_func = None
 
 # ===== 6) Configuración común para todos los regresores =====
-H = 6  # horizonte 1 paso
+H = 6  # horizonte directo (número de pasos a modelar)
 cv = TimeSeriesFold(
     steps=H,
     initial_train_size=len(y_train),
     refit=False,
 )
-
-# lags_grid = [selected_lags]
 
 # ===== 7) Iterar sobre diferentes regresores =====
 all_results = []
@@ -165,25 +152,6 @@ results_dir.mkdir(parents=True, exist_ok=True)
 exog_status = "con_exog" if USE_EXOG else "sin_exog"
 station_results_dir = results_dir / STATION / exog_status
 station_results_dir.mkdir(parents=True, exist_ok=True)
-
-# Crear subdirectorios específicos para cada tipo de archivo
-models_dir = station_results_dir / "models"
-plots_dir = station_results_dir / "plots"
-results_dir_station = station_results_dir / "results"
-summary_dir = station_results_dir / "summary"
-
-# Crear todos los subdirectorios
-for subdir in [models_dir, plots_dir, results_dir_station, summary_dir]:
-    subdir.mkdir(parents=True, exist_ok=True)
-
-print(f"\n📁 Estructura de carpetas creada para {STATION}:")
-print(f"   📂 {station_results_dir}")
-print("   ├── 📂 models/     (modelos entrenados .pkl)")
-print("   ├── 📂 plots/      (gráficos de predicciones)")
-print("   ├── 📂 results/    (resultados individuales .json)")
-print("   └── 📂 summary/    (resúmenes y comparaciones)")
-print(f"   Configuración: {exog_status}")
-print("=" * 60)
 
 for regressor_config in REGRESSORS_CONFIG:
     regressor_name = regressor_config["name"]
@@ -201,7 +169,7 @@ for regressor_config in REGRESSORS_CONFIG:
     regressor_func = regressor_func_map[regressor_func_name]
 
     print(f"\n{'=' * 60}")
-    print(f"🚀 Entrenando modelo: {regressor_name}")
+    print(f"🚀 Entrenando modelo (Direct): {regressor_name}")
     print(f"{'=' * 60}")
 
     # Crear regressor base con parámetros por defecto
@@ -209,10 +177,11 @@ for regressor_config in REGRESSORS_CONFIG:
         random_state=FEATURE_SELECTION_CONFIG["random_state"]
     )
 
-    # ===== Forecaster recursivo =====
+    # ===== Forecaster Direct =====
     forecaster_params = {
         "regressor": base_regressor,
         "lags": selected_lags,
+        "steps": H,  # modela 1..H con un modelo por horizonte
         "window_features": window_features,
         "transformer_y": FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
     }
@@ -221,7 +190,7 @@ for regressor_config in REGRESSORS_CONFIG:
     if USE_WEIGHTS:
         forecaster_params["weight_func"] = weight_func
 
-    forecaster = ForecasterRecursive(**forecaster_params)
+    forecaster = ForecasterDirect(**forecaster_params)
 
     # ===== Random Search =====
     try:
@@ -230,10 +199,9 @@ for regressor_config in REGRESSORS_CONFIG:
             y=y_trainval,
             exog=exog_trainval,
             param_distributions=param_distributions,
-            # lags_grid=lags_grid,
             cv=cv,
             metric=wmape,
-            n_iter=10,  # Aumentado para mejor tuning
+            n_iter=10,
             random_state=FEATURE_SELECTION_CONFIG["random_state"],
             return_best=True,
             n_jobs=-1,
@@ -253,7 +221,6 @@ for regressor_config in REGRESSORS_CONFIG:
                 k: v for k, v in best_params.items() if k not in params_to_remove
             }
 
-            # Manejar específicamente el parámetro 'lags' que puede ser problemático
             if "lags" in best_params:
                 lags_value = best_params["lags"]
                 if hasattr(lags_value, "tolist"):
@@ -261,13 +228,11 @@ for regressor_config in REGRESSORS_CONFIG:
                 elif isinstance(lags_value, np.ndarray):
                     best_params["lags"] = lags_value.tolist()
                 else:
-                    best_params["lags"] = str(
-                        lags_value
-                    )  # Convertir a string si es necesario
+                    best_params["lags"] = str(lags_value)
         else:
             best_params = {}
 
-        # ===== Validación post-hoc (train+val) =====
+        # ===== Validación post-hoc (train+val) con backtesting =====
         metric_vals_tv, preds_tv = backtesting_forecaster(
             forecaster=forecaster,
             y=y_trainval,
@@ -294,14 +259,35 @@ for regressor_config in REGRESSORS_CONFIG:
         print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
 
         # ===== Evaluación en test =====
-        forecaster.fit(y=y_trainval, exog=exog_trainval)
-        y_pred = forecaster.predict(steps=len(y_test), exog=exog_test)
+        # Para ForecasterDirect predecimos en bloques de tamaño H sobre test
+        y_full = pd.concat([y_trainval, y_test])
+        exog_full = pd.concat([exog_trainval, exog_test]) if USE_EXOG else None
 
-        test_rmse = rmse(y_test, y_pred)
-        test_wmape = wmape(y_test, y_pred)
+        metric_vals_test, preds_all = backtesting_forecaster(
+            forecaster=forecaster,
+            y=y_full,
+            exog=exog_full,
+            steps=H,
+            initial_train_size=len(y_trainval),
+            fixed_train_size=False,
+            refit=True,
+            metric=wmape,
+            return_predictors=True,
+            n_jobs=-1,
+            verbose=False,
+            show_progress=False,
+        )
 
-        # Calcular stepwise MAPE para test
-        stepwise_mape_test = stepwise_mape_on_test(y_test, y_pred, H=H)
+        # Filtrar sólo predicciones que caen en el rango de test
+        preds_test = preds_all.loc[preds_all.index.intersection(y_test.index)].copy()
+
+        test_rmse = rmse(y_test.loc[preds_test.index], preds_test["pred"])
+        test_wmape = wmape(y_test.loc[preds_test.index], preds_test["pred"])
+
+        # Calcular stepwise MAPE para test (usando H)
+        stepwise_mape_test = stepwise_mape_on_test(
+            y_test.loc[preds_test.index], preds_test["pred"], H=H
+        )
 
         print(f"\n🎯 Test - {regressor_name}:")
         print(f"RMSE: {test_rmse:.4f}")
@@ -316,10 +302,10 @@ for regressor_config in REGRESSORS_CONFIG:
                 if len(preds_tv) > 0
                 else pd.DataFrame(),
                 y_test=y_test,
-                y_pred_test=y_pred,
+                y_pred_test=preds_test["pred"],
                 model_name=regressor_name,
                 station=STATION,
-                save_dir=plots_dir,
+                save_dir=station_results_dir,
             )
             print(f"📊 Gráficos creados exitosamente para {regressor_name}")
         except Exception as e:
@@ -328,9 +314,10 @@ for regressor_config in REGRESSORS_CONFIG:
 
         # ===== Guardar modelo entrenado =====
         timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        model_file = models_dir / f"{regressor_name}_model_{timestamp_str}.pkl"
+        model_file = (
+            station_results_dir / f"{regressor_name}_direct_model_{timestamp_str}.pkl"
+        )
 
-        # Guardar el forecaster entrenado
         with open(model_file, "wb") as f:
             pickle.dump(forecaster, f)
 
@@ -339,7 +326,7 @@ for regressor_config in REGRESSORS_CONFIG:
         # Preparar datos para guardar
         result_data = {
             "station": STATION,
-            "model_type": regressor_name,
+            "model_type": f"{regressor_name} (Direct)",
             "use_exog": USE_EXOG,
             "use_weights": USE_WEIGHTS,
             "validation_metrics": {
@@ -360,7 +347,9 @@ for regressor_config in REGRESSORS_CONFIG:
 
         # Guardar resultados individuales
         timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        result_file = results_dir_station / f"{regressor_name}_{timestamp_str}.json"
+        result_file = (
+            station_results_dir / f"{regressor_name}_direct_{timestamp_str}.json"
+        )
 
         with open(result_file, "w", encoding="utf-8") as f:
             json.dump(result_data, f, indent=2, ensure_ascii=False)
@@ -403,7 +392,7 @@ for regressor_config in REGRESSORS_CONFIG:
 
 # ===== 8) Resumen de resultados =====
 print(f"\n{'=' * 80}")
-print(f"📋 RESUMEN DE RESULTADOS PARA ESTACIÓN: {STATION}")
+print(f"📋 RESUMEN DE RESULTADOS (Direct) PARA ESTACIÓN: {STATION}")
 print(
     f"🔧 Configuración: {'Con exógenas' if USE_EXOG else 'Sin exógenas'}, {'Con pesos' if USE_WEIGHTS else 'Sin pesos'}"
 )
@@ -418,13 +407,12 @@ for i, (_, row) in enumerate(results_df.iterrows(), 1):
         print(
             f"{i}. {row['regressor']}: WMAPE = {100 * row['test_wmape']:.2f}%, RMSE = {row['test_rmse']:.4f}"
         )
-        # Mostrar stepwise MAPE para el mejor modelo
         if i == 1:
             print(f"   Stepwise MAPE Test: {row['test_stepwise_mape']}")
     else:
         print(f"{i}. {row['regressor']}: ERROR - {row.get('error', 'Unknown error')}")
 
-print(f"\n🥇 MEJOR MODELO: {results_df.iloc[0]['regressor']}")
+print(f"\n🥇 MEJOR MODELO: {results_df.iloc[0]['regressor']} (Direct)")
 print(f"Test WMAPE: {100 * results_df.iloc[0]['test_wmape']:.2f}%")
 print(f"Test RMSE: {results_df.iloc[0]['test_rmse']:.4f}")
 print(f"Test Stepwise MAPE: {results_df.iloc[0]['test_stepwise_mape']}")
@@ -441,6 +429,8 @@ summary_data = {
         "use_exog": USE_EXOG,
         "use_weights": USE_WEIGHTS,
         "timestamp": pd.Timestamp.now().isoformat(),
+        "strategy": "Direct (ForecasterDirect)",
+        "horizon": H,
     },
     "results_summary": results_df.to_dict("records"),
     "best_model": {
@@ -457,7 +447,7 @@ summary_data = {
 
 # Guardar resumen completo
 timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-summary_file = summary_dir / f"summary_{timestamp_str}.json"
+summary_file = station_results_dir / f"summary_direct_{timestamp_str}.json"
 
 with open(summary_file, "w", encoding="utf-8") as f:
     json.dump(summary_data, f, indent=2, ensure_ascii=False)
@@ -465,8 +455,8 @@ with open(summary_file, "w", encoding="utf-8") as f:
 print(f"\n💾 Resumen completo guardado en: {summary_file}")
 
 # Guardar también como CSV para fácil análisis
-csv_file = summary_dir / f"results_comparison_{timestamp_str}.csv"
+csv_file = station_results_dir / f"results_comparison_direct_{timestamp_str}.csv"
 results_df.to_csv(csv_file, index=False)
 print(f"📊 Comparación en CSV guardada en: {csv_file}")
 
-print(f"\n✅ Proceso completado para estación {STATION}")
+print(f"\n✅ Proceso (Direct) completado para estación {STATION}")

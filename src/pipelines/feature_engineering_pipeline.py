@@ -20,15 +20,15 @@ from ..constants.parsed_fields import (
 )
 
 
-def _auto_trim_hours(temp_windows: Optional[List[str]]) -> int:
+def _auto_trim_hours(window_windows: Optional[List[str]]) -> int:
     """
     Devuelve el recorte inicial mínimo en filas para cubrir la ventana máxima.
     Asume ventanas como '3h','6h','24h',... y frecuencia fija horaria.
     """
-    if not temp_windows:
+    if not window_windows:
         return 0
     hours = []
-    for w in temp_windows:
+    for w in window_windows:
         wl = w.lower().strip()
         if wl.endswith("h"):
             try:
@@ -83,10 +83,10 @@ class FeatureEngineeringPipeline:
     # -----------------------------------------------------
     def create_feature_engineering_features(
         self,
-        temp_columns: List[str],
+        window_columns: List[str],
         calendar_features: List[str] = None,
-        temp_windows: List[str] = None,
-        temp_functions: List[str] = None,
+        window_windows: List[str] = None,
+        window_functions: List[str] = None,
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
     ) -> pd.DataFrame:
@@ -102,14 +102,14 @@ class FeatureEngineeringPipeline:
         base_delta = pd.Timedelta(hours=1)
 
         # --- Auto-trim simple en horas ---
-        auto_trim = _auto_trim_hours(temp_windows)
+        auto_trim = _auto_trim_hours(window_windows)
         eff_trim_start = max(trim_start or 0, auto_trim)
 
         print(f"Ubicación: {self.feature_engineering.location_config['name']}")
         print(f"Frecuencia: {infer_freq} (delta típico={base_delta})")
-        print(f"Temp columns: {temp_columns}")
-        print(f"Temp windows: {temp_windows}")
-        print(f"Temp functions: {temp_functions}")
+        print(f"Window columns: {window_columns}")
+        print(f"Window windows: {window_windows}")
+        print(f"Window functions: {window_functions}")
         print(f"Trim (user): start={trim_start}, end={trim_end}")
         print(f"Trim (auto por ventanas): start={auto_trim}")
         print(f"Trim (efectivo): start={eff_trim_start}, end={trim_end}")
@@ -149,9 +149,9 @@ class FeatureEngineeringPipeline:
         feature_engineering_features = self.feature_engineering.create_all_features(
             data=raw_with_patch,
             calendar_features=calendar_features,
-            temp_columns=temp_columns,
-            temp_windows=temp_windows,
-            temp_functions=temp_functions,
+            window_columns=window_columns,
+            window_windows=window_windows,
+            window_functions=window_functions,
             trim_start=eff_trim_start,
             trim_end=trim_end,
             freq=infer_freq,  # fijo 'h'
@@ -221,10 +221,10 @@ class FeatureEngineeringPipeline:
     def run_complete_pipeline(
         self,
         file_path: str,
-        temp_columns: List[str],
+        window_columns: List[str],
         calendar_features: List[str] = None,
-        temp_windows: List[str] = None,
-        temp_functions: List[str] = None,
+        window_windows: List[str] = None,
+        window_functions: List[str] = None,
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
     ) -> Dict[str, Any]:
@@ -234,10 +234,10 @@ class FeatureEngineeringPipeline:
         try:
             raw_data = self.load_data(file_path)
             result = self.create_feature_engineering_features(
-                temp_columns=temp_columns,
+                window_columns=window_columns,
                 calendar_features=calendar_features,
-                temp_windows=temp_windows,
-                temp_functions=temp_functions,
+                window_windows=window_windows,
+                window_functions=window_functions,
                 trim_start=trim_start,
                 trim_end=trim_end,
             )
