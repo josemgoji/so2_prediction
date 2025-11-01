@@ -6,7 +6,6 @@ utilizadas en el pipeline de procesamiento de datos y modelado de series tempora
 """
 
 from pathlib import Path
-import numpy as np
 
 # =============================================================================
 # CONFIGURACIÓN DE RUTAS DEL PROYECTO
@@ -170,48 +169,48 @@ REGRESSORS_CONFIG = [
             "extra_trees": [True, False],
         },
     },
-    {
-        "name": "XGBoost",
-        "regressor_func": "create_xgb_regressor",
-        "params": {
-            "n_estimators": [300, 600, 1000, 1500],
-            "learning_rate": [0.10, 0.05, 0.03, 0.02],
-            "max_depth": [3, 5, 7, 10],
-            "min_child_weight": [1, 3, 5, 10],
-            "subsample": [0.6, 0.8, 1.0],
-            "colsample_bytree": [0.6, 0.8, 1.0],
-            "colsample_bylevel": [0.6, 0.8, 1.0],
-            "gamma": [0.0, 0.1, 0.3, 1.0],
-            "reg_alpha": [0.0, 0.1, 1.0, 10.0],
-            "reg_lambda": [0.1, 1.0, 10.0],
-            "tree_method": ["hist"],
-            "grow_policy": ["depthwise", "lossguide"],
-            "max_leaves": [0, 31, 63, 127],
-        },
-    },
-    {
-        "name": "Random Forest",
-        "regressor_func": "create_rf_regressor",
-        "params": {
-            "n_estimators": [300, 600, 1000],
-            "max_depth": [None, 10, 20, 30],
-            "min_samples_split": [2, 5, 10, 20],
-            "min_samples_leaf": [1, 2, 4, 10],
-            "max_features": ["sqrt", "log2", 0.6, 0.8, 1.0],
-            "bootstrap": [True],  # en TS conviene mantener bootstrap
-            "ccp_alpha": [0.0, 0.0005, 0.001, 0.01],
-            "max_leaf_nodes": [None, 1000, 2000],  # opcional
-        },
-    },
-    {
-        "name": "Lasso",
-        "regressor_func": "create_lasso_regressor",
-        "params": {
-            "alpha": [0.01, 0.1, 1.0, 10.0],
-            "max_iter": [1000, 5000],
-            "tol": [1e-4, 1e-3],
-        },
-    },
+    # {
+    #     "name": "XGBoost",
+    #     "regressor_func": "create_xgb_regressor",
+    #     "params": {
+    #         "n_estimators": [300, 600, 1000, 1500],
+    #         "learning_rate": [0.10, 0.05, 0.03, 0.02],
+    #         "max_depth": [3, 5, 7, 10],
+    #         "min_child_weight": [1, 3, 5, 10],
+    #         "subsample": [0.6, 0.8, 1.0],
+    #         "colsample_bytree": [0.6, 0.8, 1.0],
+    #         "colsample_bylevel": [0.6, 0.8, 1.0],
+    #         "gamma": [0.0, 0.1, 0.3, 1.0],
+    #         "reg_alpha": [0.0, 0.1, 1.0, 10.0],
+    #         "reg_lambda": [0.1, 1.0, 10.0],
+    #         "tree_method": ["hist"],
+    #         "grow_policy": ["depthwise", "lossguide"],
+    #         "max_leaves": [0, 31, 63, 127],
+    #     },
+    # },
+    # {
+    #     "name": "Random Forest",
+    #     "regressor_func": "create_rf_regressor",
+    #     "params": {
+    #         "n_estimators": [300, 600, 1000],
+    #         "max_depth": [None, 10, 20, 30],
+    #         "min_samples_split": [2, 5, 10, 20],
+    #         "min_samples_leaf": [1, 2, 4, 10],
+    #         "max_features": ["sqrt", "log2", 0.6, 0.8, 1.0],
+    #         "bootstrap": [True],  # en TS conviene mantener bootstrap
+    #         "ccp_alpha": [0.0, 0.0005, 0.001, 0.01],
+    #         "max_leaf_nodes": [None, 1000, 2000],  # opcional
+    #     },
+    # },
+    # {
+    #     "name": "Lasso",
+    #     "regressor_func": "create_lasso_regressor",
+    #     "params": {
+    #         "alpha": [0.01, 0.1, 1.0, 10.0],
+    #         "max_iter": [1000, 5000],
+    #         "tol": [1e-4, 1e-3],
+    #     },
+    # },
 ]
 
 # # =============================================================================
