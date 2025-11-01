@@ -1,6 +1,7 @@
 # --- imports
 import json
 import pickle
+import warnings
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
@@ -26,7 +27,7 @@ from src.recursos.scorers import (
     stepwise_mape_from_backtesting,
     stepwise_mape_on_test,
 )
-from src.utils.data_splitter import split_data_by_dates
+from src.utils.data_splitter import split_data_by_dates, apply_target_shift
 from src.utils.plot_utils import create_prediction_plots
 from src.utils.results_manager import (
     clean_params_for_json,
@@ -41,7 +42,6 @@ from skforecast.model_selection import (
     backtesting_forecaster,
 )
 
-from sklearn.preprocessing import FunctionTransformer
 from src.constants.parsed_fields import (
     FEATURE_SELECTION_CONFIG,
     REGRESSORS_CONFIG,
@@ -51,27 +51,25 @@ from src.constants.parsed_fields import (
 
 def train_and_evaluate_models(
     station: str,
-    horizon: int,
+    step: int,
     use_exog: bool = True,
-    use_weights: bool = False,
     n_trials: int = 20,
     study_storage: Optional[str] = None,
     val_months: int = 2,
     test_months: int = 2,
+    horizon: int = 0,
 ) -> Dict[str, Any]:
     """
-    Entrena y evalúa modelos para una estación y horizonte dados.
+    Entrena y evalúa modelos para una estación y step dados.
 
     Parameters:
     -----------
     station : str
         Nombre de la estación (ej: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC")
-    horizon : int
-        Horizonte de predicción en horas (ej: 6, 24, 72)
+    step : int
+        Step de predicción en horas (ej: 6, 24, 72) - pasos hacia adelante que se predicen
     use_exog : bool
         True para modelo con exógenas, False para sin exógenas
-    use_weights : bool
-        True para usar pesos de gaps, False para desactivar
     n_trials : int
         Número de trials para Optuna
     study_storage : str, optional
@@ -80,6 +78,11 @@ def train_and_evaluate_models(
         Número de meses para validación
     test_months : int
         Número de meses para test
+    horizon : int, default=0
+        Horizonte de shift del target.
+        Si horizon > 0, el target se shifteará para predecir desde el paso 'horizon'.
+        Ejemplo: horizon=24 significa que en tiempo t predecimos el valor en tiempo t+24.
+        Esto permite entrenar el modelo para predecir directamente en un tiempo futuro específico.
 
     Returns:
     --------
@@ -87,7 +90,9 @@ def train_and_evaluate_models(
         Diccionario con los resultados del entrenamiento
     """
     print(f"\n{'=' * 80}")
-    print(f"Entrenando modelos para estacion: {station}, Horizonte: {horizon}")
+    print(f"Entrenando modelos para estacion: {station}, Step: {step}")
+    if horizon > 0:
+        print(f"Horizonte de shift: {horizon}")
     print(f"{'=' * 80}")
 
     # =============================================================================
@@ -97,6 +102,11 @@ def train_and_evaluate_models(
     df = df.sort_index()
 
     TARGET_COL = "target"
+
+    # Aplicar shift al target si horizon > 0
+    if horizon > 0:
+        print(f"\nAplicando shift al target: horizon={horizon}")
+        df = apply_target_shift(df, target_col=TARGET_COL, step=horizon)
 
     # Cargar selección de características desde JSON
     exog_status_feat = "con_exog" if use_exog else "sin_exog"
@@ -151,31 +161,11 @@ def train_and_evaluate_models(
     )
 
     # =============================================================================
-    # PESOS (opcional)
-    # =============================================================================
-    if use_weights:
-        weights_path = Path(f"data/stage/SO2/marks/weights_{station}.csv")
-        if weights_path.exists():
-            weights = pd.read_csv(weights_path, parse_dates=["datetime"]).set_index(
-                "datetime"
-            )["weight"]
-
-            def weight_func(index: pd.DatetimeIndex) -> np.ndarray:
-                return weights.reindex(index).fillna(1.0).to_numpy()
-        else:
-            print(
-                f"⚠️  Archivo de pesos no encontrado: {weights_path}. Desactivando pesos."
-            )
-            weight_func = None
-    else:
-        weight_func = None
-
-    # =============================================================================
     # CV Y ESTRUCTURA DE RESULTADOS
     # =============================================================================
-    H = horizon
+    S = step  # Step de predicción
     cv = TimeSeriesFold(
-        steps=H,
+        steps=S,
         initial_train_size=len(y_train),
         refit=False,
     )
@@ -188,7 +178,9 @@ def train_and_evaluate_models(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     exog_status = "con_exog" if use_exog else "sin_exog"
-    station_results_dir = results_dir / station / exog_status / f"H{H}"
+    station_results_dir = results_dir / station / exog_status / f"S{S}"
+    if horizon > 0:
+        station_results_dir = station_results_dir / f"H{horizon}"
     station_results_dir.mkdir(parents=True, exist_ok=True)
 
     models_dir = station_results_dir / "models"
@@ -205,7 +197,9 @@ def train_and_evaluate_models(
     print("   -- plots/      (graficos de predicciones)")
     print("   -- results/    (resultados individuales .json)")
     print("   -- summary/    (resumenes y comparaciones)")
-    print(f"   Configuracion: {exog_status}, Horizonte: {H}")
+    print(f"   Configuracion: {exog_status}, Step: {S}")
+    if horizon > 0:
+        print(f"   Horizonte de shift: {horizon}")
     print("=" * 60)
 
     # =============================================================================
@@ -257,8 +251,6 @@ def train_and_evaluate_models(
                 regressor=base_regressor,
                 lags=selected_lags,
                 window_features=window_features,
-                transformer_y=FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
-                **({"weight_func": weight_func} if use_weights else {}),
             )
 
             # 4) Backtesting (si falla, penaliza)
@@ -285,7 +277,7 @@ def train_and_evaluate_models(
             direction="minimize",
             sampler=STUDY_SAMPLER,
             storage=study_storage,
-            study_name=f"{station}_{regressor_name}_H{H}" if study_storage else None,
+            study_name=f"{station}_{regressor_name}_S{S}" if study_storage else None,
             load_if_exists=bool(study_storage),
         )
         study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
@@ -303,8 +295,6 @@ def train_and_evaluate_models(
             regressor=base_regressor_best,
             lags=selected_lags,  # si deseas optimizar lags, agrégalo a params y cámbialo aquí
             window_features=window_features,
-            transformer_y=FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
-            **({"weight_func": weight_func} if use_weights else {}),
         )
 
         # -------------------------------------------------------------------------
@@ -338,7 +328,7 @@ def train_and_evaluate_models(
             # TEST
             # ---------------------------------------------------------------------
             cv_test = TimeSeriesFold(
-                steps=H,
+                steps=S,
                 initial_train_size=len(y_trainval),
                 refit=False,
             )
@@ -364,7 +354,7 @@ def train_and_evaluate_models(
                 test_rmse = rmse(y_test_aligned, y_pred_aligned)
                 test_wmape = wmape(y_test_aligned, y_pred_aligned)
                 stepwise_mape_test = stepwise_mape_on_test(
-                    y_test_aligned, y_pred_aligned, H=H
+                    y_test_aligned, y_pred_aligned, H=S
                 )
             else:
                 print(
@@ -401,11 +391,7 @@ def train_and_evaluate_models(
 
             # Guardar modelo
             timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-            weights_suffix = "w" if use_weights else "nw"
-            model_file = (
-                models_dir
-                / f"{regressor_name}_model_{weights_suffix}_{timestamp_str}.pkl"
-            )
+            model_file = models_dir / f"{regressor_name}_model_{timestamp_str}.pkl"
 
             with open(model_file, "wb") as f:
                 pickle.dump(forecaster, f)
@@ -417,8 +403,8 @@ def train_and_evaluate_models(
                 "station": station,
                 "model_type": regressor_name,
                 "use_exog": use_exog,
-                "use_weights": use_weights,
-                "horizon": H,
+                "step": S,
+                "horizon": horizon if horizon > 0 else None,
                 "validation_metrics": {
                     "wmape": float(mape_overall_tv),
                     "rmse": float(rmse_tv),
@@ -444,7 +430,6 @@ def train_and_evaluate_models(
                 result_data=result_data,
                 results_dir=results_dir_station,
                 regressor_name=regressor_name,
-                use_weights=use_weights,
                 timestamp_str=timestamp_str,
             )
 
@@ -496,7 +481,6 @@ def train_and_evaluate_models(
         all_results=all_results,
         station=station,
         use_exog=use_exog,
-        use_weights=use_weights,
     )
 
     # Guardar resumen y comparación
@@ -504,20 +488,21 @@ def train_and_evaluate_models(
         all_results=all_results,
         station=station,
         use_exog=use_exog,
-        use_weights=use_weights,
         summary_dir=summary_dir,
         timestamp_str=timestamp_str,
     )
 
     print(f"\nResumen completo guardado en: {summary_file}")
     print(f"Comparacion en CSV guardada en: {csv_file}")
-    print(f"\n✅ Proceso completado para estacion {station}, horizonte {H}")
+    print(f"\n✅ Proceso completado para estacion {station}, step {S}")
+    if horizon > 0:
+        print(f"   Horizonte de shift: {horizon}")
 
     return {
         "station": station,
-        "horizon": H,
+        "step": S,
+        "horizon": horizon if horizon > 0 else None,
         "use_exog": use_exog,
-        "use_weights": use_weights,
         "results": all_results,
         "summary_file": str(summary_file),
         "csv_file": str(csv_file),
@@ -532,16 +517,19 @@ if __name__ == "__main__":
     # Configuración por defecto para ejecución directa
     STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
-    USE_WEIGHTS = False  # True para usar pesos de gaps, False para desactivar
-    H = 72  # horizonte de predicción
+    STEP = 72  # step de predicción (pasos hacia adelante que se predicen)
     N_TRIALS = 20  # ajusta según presupuesto
     STUDY_STORAGE = None  # ej: "sqlite:///optuna.db" si quieres persistir estudios
 
+    HORIZON = (
+        0  # Horizonte para shift del target (0 = no shift, >0 = shift hacia adelante)
+    )
+
     result = train_and_evaluate_models(
         station=STATION,
-        horizon=H,
+        step=STEP,
         use_exog=USE_EXOG,
-        use_weights=USE_WEIGHTS,
         n_trials=N_TRIALS,
         study_storage=STUDY_STORAGE,
+        horizon=HORIZON,
     )

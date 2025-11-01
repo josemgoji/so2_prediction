@@ -213,3 +213,58 @@ def split_data_by_percentage(
         y_trainval,
         exog_trainval,
     )
+
+
+def apply_target_shift(
+    df: pd.DataFrame,
+    target_col: str,
+    step: int,
+) -> pd.DataFrame:
+    """
+    Aplica un shift al target para predecir desde el paso 'step' en adelante.
+    Elimina las filas que quedan con NaN después del shift.
+
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        DataFrame con datetime index y columna target
+    target_col : str
+        Nombre de la columna target
+    step : int
+        Número de pasos hacia adelante para shiftear el target.
+        Si step > 0, el target se shifteará hacia atrás (para predecir step pasos adelante)
+        Ejemplo: step=24 significa que en tiempo t predecimos el valor en tiempo t+24
+
+    Returns:
+    --------
+    pd.DataFrame
+        DataFrame con el target shiftado y filas con NaN eliminadas
+
+    Example:
+    --------
+    Si step=24, y tienes datos en horas:
+    - En tiempo t=0, ahora el target será el valor que estaba en t=24
+    - Esto permite entrenar para predecir 24 horas adelante
+    """
+    if target_col not in df.columns:
+        raise ValueError(f"La columna target '{target_col}' no existe en el DataFrame")
+
+    if step <= 0:
+        return df.copy()
+
+    # Crear copia para no modificar el original
+    df_shifted = df.copy()
+
+    # Aplicar shift: si step=24, el target en tiempo t será el valor de t+24
+    # Esto se logra con shift negativo (hacia atrás en el tiempo)
+    df_shifted[target_col] = df_shifted[target_col].shift(-step)
+
+    # Eliminar filas con NaN (estas son las últimas 'step' filas que no tienen target futuro)
+    df_shifted = df_shifted.dropna(subset=[target_col])
+
+    print(f"Target shift aplicado: step={step}")
+    print(f"  Filas originales: {len(df)}")
+    print(f"  Filas después del shift y eliminación de NaN: {len(df_shifted)}")
+    print(f"  Filas eliminadas: {len(df) - len(df_shifted)}")
+
+    return df_shifted

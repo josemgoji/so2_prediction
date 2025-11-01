@@ -33,7 +33,6 @@ def save_individual_result(
     result_data: Dict[str, Any],
     results_dir: Path,
     regressor_name: str,
-    use_weights: bool,
     timestamp_str: str,
 ) -> Path:
     """
@@ -47,8 +46,6 @@ def save_individual_result(
         Directorio donde guardar el resultado
     regressor_name : str
         Nombre del regresor
-    use_weights : bool
-        Si se usaron pesos o no
     timestamp_str : str
         Timestamp para el nombre del archivo
         
@@ -57,8 +54,7 @@ def save_individual_result(
     Path
         Ruta del archivo guardado
     """
-    weights_suffix = "w" if use_weights else "nw"
-    result_file = results_dir / f"{regressor_name}_{weights_suffix}_{timestamp_str}.json"
+    result_file = results_dir / f"{regressor_name}_{timestamp_str}.json"
 
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump(result_data, f, indent=2, ensure_ascii=False)
@@ -70,7 +66,6 @@ def save_summary_and_comparison(
     all_results: List[Dict[str, Any]],
     station: str,
     use_exog: bool,
-    use_weights: bool,
     summary_dir: Path,
     timestamp_str: str,
 ) -> tuple[Path, Path]:
@@ -85,8 +80,6 @@ def save_summary_and_comparison(
         Nombre de la estación
     use_exog : bool
         Si se usaron variables exógenas
-    use_weights : bool
-        Si se usaron pesos
     summary_dir : Path
         Directorio donde guardar los archivos
     timestamp_str : str
@@ -102,14 +95,11 @@ def save_summary_and_comparison(
     results_df = pd.DataFrame(all_results)
     results_df = results_df.sort_values("test_wmape")
 
-    weights_suffix = "w" if use_weights else "nw"
-
     # Crear resumen completo
     summary_data = {
         "station": station,
         "configuration": {
             "use_exog": use_exog,
-            "use_weights": use_weights,
             "timestamp": pd.Timestamp.now().isoformat(),
         },
         "results_summary": results_df.to_dict("records"),
@@ -125,12 +115,12 @@ def save_summary_and_comparison(
         },
     }
 
-    summary_file = summary_dir / f"summary_{weights_suffix}_{timestamp_str}.json"
+    summary_file = summary_dir / f"summary_{timestamp_str}.json"
     with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(summary_data, f, indent=2, ensure_ascii=False)
 
     # Guardar CSV de comparación
-    csv_file = summary_dir / f"results_comparison_{weights_suffix}_{timestamp_str}.csv"
+    csv_file = summary_dir / f"results_comparison_{timestamp_str}.csv"
     results_df.to_csv(csv_file, index=False)
 
     return summary_file, csv_file
@@ -140,7 +130,6 @@ def print_results_summary(
     all_results: List[Dict[str, Any]],
     station: str,
     use_exog: bool,
-    use_weights: bool,
 ) -> None:
     """
     Imprime un resumen de los resultados en consola
@@ -153,8 +142,6 @@ def print_results_summary(
         Nombre de la estación
     use_exog : bool
         Si se usaron variables exógenas
-    use_weights : bool
-        Si se usaron pesos
     """
     results_df = pd.DataFrame(all_results)
     results_df = results_df.sort_values("test_wmape")
@@ -162,7 +149,7 @@ def print_results_summary(
     print(f"\n{'=' * 80}")
     print(f"RESUMEN DE RESULTADOS PARA ESTACION: {station}")
     print(
-        f"Configuracion: {'Con exogenas' if use_exog else 'Sin exogenas'}, {'Con pesos' if use_weights else 'Sin pesos'}"
+        f"Configuracion: {'Con exogenas' if use_exog else 'Sin exogenas'}"
     )
     print(f"{'=' * 80}")
 

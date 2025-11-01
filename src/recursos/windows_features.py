@@ -58,7 +58,6 @@ class CustomRollingFeatures:
         return pd.DataFrame(result_data, index=y.index)
 
     def transform(self, y: np.ndarray) -> np.ndarray:
-        # ➜ DEVOLVER 1D
         res = []
         for w in self.window_sizes:
             if len(y) >= w:

@@ -141,10 +141,10 @@ class FeatureEngineeringPipeline:
         if exog_cols:
             print(f"[INFO] Aplicando shift de 1h a exógenas: {exog_cols}")
             raw_with_patch[exog_cols] = raw_with_patch[exog_cols].shift(1)
-            raw_with_patch = raw_with_patch.dropna() 
+            raw_with_patch = raw_with_patch.dropna()
 
         # -------------------------------------------------
-        # Crear engineered features (con freq fija 'h')
+        # Crear engineered features
         # -------------------------------------------------
         feature_engineering_features = self.feature_engineering.create_all_features(
             data=raw_with_patch,
@@ -152,8 +152,6 @@ class FeatureEngineeringPipeline:
             window_columns=window_columns,
             window_windows=window_windows,
             window_functions=window_functions,
-            trim_start=eff_trim_start,
-            trim_end=trim_end,
             freq=infer_freq,  # fijo 'h'
         )
 

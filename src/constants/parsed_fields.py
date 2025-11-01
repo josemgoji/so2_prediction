@@ -99,7 +99,7 @@ DEFAULT_WINDOW_FUNCTIONS = ["mean", "std"]  # Para rolling de variables exógena
 
 # Configuración completa del pipeline de feature engineering (usado en run_feature_engineering.py)
 FEATURE_ENGINEERING_CONFIG = {
-    "window_columns": ["TAire10_SSR"],
+    "window_columns": ["TAire10_SSR", "VViento_SSR","HAire10_SSR"],
     "calendar_features": DEFAULT_CALENDAR_FEATURES,
     "window_windows": DEFAULT_WINDOW_WINDOWS,
     "window_functions": DEFAULT_WINDOW_FUNCTIONS,
