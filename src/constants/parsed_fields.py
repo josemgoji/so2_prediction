@@ -6,6 +6,7 @@ utilizadas en el pipeline de procesamiento de datos y modelado de series tempora
 """
 
 from pathlib import Path
+import numpy as np
 
 # =============================================================================
 # CONFIGURACIÓN DE RUTAS DEL PROYECTO
@@ -81,7 +82,6 @@ DEFAULT_WINDOW_PERIOD = 24
 DEFAULT_WINDOW_STATS = ["mean", "std", "min", "max"]
 DEFAULT_WINDOW_SIZES = [3, 6, 12, 24, 48, 72]  # Para windows_features.py (sin "h")
 DEFAULT_FOURIER_K = 3
-DEFAULT_STL_ROBUST = True
 
 # Configuración específica para características exógenas de ventana (usado en feature_engineering.py)
 DEFAULT_WINDOW_WINDOWS = [
@@ -118,7 +118,6 @@ DEFAULT_WINDOW_FEATURES_PARAMS = {
     "stats": DEFAULT_WINDOW_STATS,
     "window_sizes": DEFAULT_WINDOW_SIZES,
     "fourier_k": DEFAULT_FOURIER_K,
-    "stl_robust": DEFAULT_STL_ROBUST,
 }
 
 # Configuración completa del pipeline de feature selection (usado en run_feature_selection.py)
@@ -127,8 +126,8 @@ FEATURE_SELECTION_CONFIG = {
     "output_path": str(STAGE_DIR / "SO2" / "selected"),
     "file_pattern": "processed_{station}.csv",
     "selector_type": "lasso",
-    "regressor_type": "rf",
-    "lags": 72,
+    "regressor_type": "lasso",
+    "lags": list(range(1, 73)) + [168, 672],
     "window_features_params": DEFAULT_WINDOW_FEATURES_PARAMS,
     "selector_params": {},
     "regressor_params": {},
@@ -150,6 +149,8 @@ FEATURE_SELECTION_RUN_CONFIG = {
 # =============================================================================
 # CONFIGURACIÓN DE REGRESORES Y PARÁMETROS
 # =============================================================================
+
+# Configuración de regresores para modelado
 REGRESSORS_CONFIG = [
     {
         "name": "LGBM",
@@ -158,11 +159,10 @@ REGRESSORS_CONFIG = [
             "n_estimators": [300, 600, 1000, 1500],
             "learning_rate": [0.10, 0.05, 0.03, 0.02],
             "num_leaves": [31, 63, 127, 255],
-            "objective": ["quantile"],
             "max_depth": [-1, 10, 15, 20],
             "min_child_samples": [10, 20, 50, 100],
-            "feature_fraction": [0.6, 0.8, 1.0],  
-            "bagging_fraction": [0.6, 0.8, 1.0], 
+            "feature_fraction": [0.6, 0.8, 1.0],  # (= colsample_bytree)
+            "bagging_fraction": [0.6, 0.8, 1.0],  # (= subsample)
             "bagging_freq": [0, 1, 5],
             "lambda_l1": [0.0, 0.1, 1.0, 5.0],
             "lambda_l2": [0.0, 0.1, 1.0, 5.0],
@@ -170,74 +170,53 @@ REGRESSORS_CONFIG = [
             "extra_trees": [True, False],
         },
     },
+    {
+        "name": "XGBoost",
+        "regressor_func": "create_xgb_regressor",
+        "params": {
+            "n_estimators": [300, 600, 1000, 1500],
+            "learning_rate": [0.10, 0.05, 0.03, 0.02],
+            "max_depth": [3, 5, 7, 10],
+            "min_child_weight": [1, 3, 5, 10],
+            "subsample": [0.6, 0.8, 1.0],
+            "colsample_bytree": [0.6, 0.8, 1.0],
+            "colsample_bylevel": [0.6, 0.8, 1.0],
+            "gamma": [0.0, 0.1, 0.3, 1.0],
+            "reg_alpha": [0.0, 0.1, 1.0, 10.0],
+            "reg_lambda": [0.1, 1.0, 10.0],
+            "tree_method": ["hist"],
+            "grow_policy": ["depthwise", "lossguide"],
+            "max_leaves": [0, 31, 63, 127],
+        },
+    },
+    {
+        "name": "Random Forest",
+        "regressor_func": "create_rf_regressor",
+        "params": {
+            "n_estimators": [300, 600, 1000],
+            "max_depth": [None, 10, 20, 30],
+            "min_samples_split": [2, 5, 10, 20],
+            "min_samples_leaf": [1, 2, 4, 10],
+            "max_features": ["sqrt", "log2", 0.6, 0.8, 1.0],
+            "bootstrap": [True],  # en TS conviene mantener bootstrap
+            "ccp_alpha": [0.0, 0.0005, 0.001, 0.01],
+            "max_leaf_nodes": [None, 1000, 2000],  # opcional
+        },
+    },
+    {
+        "name": "Lasso",
+        "regressor_func": "create_lasso_regressor",
+        "params": {
+            "alpha": [0.01, 0.1, 1.0, 10.0],
+            "max_iter": [1000, 5000],
+            "tol": [1e-4, 1e-3],
+        },
+    },
 ]
-# Configuración de regresores para modelado
-# REGRESSORS_CONFIG = [
-#     {
-#         "name": "LGBM",
-#         "regressor_func": "create_lgbm_regressor",
-#         "params": {
-#             "n_estimators": [300, 600, 1000, 1500],
-#             "learning_rate": [0.10, 0.05, 0.03, 0.02],
-#             "num_leaves": [31, 63, 127, 255],
-#             "max_depth": [-1, 10, 15, 20],
-#             "min_child_samples": [10, 20, 50, 100],
-#             "feature_fraction": [0.6, 0.8, 1.0],  # (= colsample_bytree)
-#             "bagging_fraction": [0.6, 0.8, 1.0],  # (= subsample)
-#             "bagging_freq": [0, 1, 5],
-#             "lambda_l1": [0.0, 0.1, 1.0, 5.0],
-#             "lambda_l2": [0.0, 0.1, 1.0, 5.0],
-#             "min_split_gain": [0.0, 0.1, 0.3],
-#             "extra_trees": [True, False],
-#         },
-#     },
-#     {
-#         "name": "XGBoost",
-#         "regressor_func": "create_xgb_regressor",
-#         "params": {
-#             "n_estimators": [300, 600, 1000, 1500],
-#             "learning_rate": [0.10, 0.05, 0.03, 0.02],
-#             "max_depth": [3, 5, 7, 10],
-#             "min_child_weight": [1, 3, 5, 10],
-#             "subsample": [0.6, 0.8, 1.0],
-#             "colsample_bytree": [0.6, 0.8, 1.0],
-#             "colsample_bylevel": [0.6, 0.8, 1.0],
-#             "gamma": [0.0, 0.1, 0.3, 1.0],
-#             "reg_alpha": [0.0, 0.1, 1.0, 10.0],
-#             "reg_lambda": [0.1, 1.0, 10.0],
-#             "tree_method": ["hist"],
-#             "grow_policy": ["depthwise", "lossguide"],
-#             "max_leaves": [0, 31, 63, 127],
-#         },
-#     },
-#     {
-#         "name": "Random Forest",
-#         "regressor_func": "create_rf_regressor",
-#         "params": {
-#             "n_estimators": [300, 600, 1000],
-#             "max_depth": [None, 10, 20, 30],
-#             "min_samples_split": [2, 5, 10, 20],
-#             "min_samples_leaf": [1, 2, 4, 10],
-#             "max_features": ["sqrt", "log2", 0.6, 0.8, 1.0],
-#             "bootstrap": [True],  # en TS conviene mantener bootstrap
-#             "ccp_alpha": [0.0, 0.0005, 0.001, 0.01],
-#             "max_leaf_nodes": [None, 1000, 2000],  # opcional
-#         },
-#     },
-#     {
-#         "name": "Lasso",
-#         "regressor_func": "create_lasso_regressor",
-#         "params": {
-#             "alpha": [0.01, 0.1, 1.0, 10.0],
-#             "max_iter": [1000, 5000],
-#             "tol": [1e-4, 1e-3],
-#         },
-#     },
-# ]
 
-# =============================================================================
-# CONFIGURACIÓN DE GUARDADO DE RESULTADOS
-# =============================================================================
+# # =============================================================================
+# # CONFIGURACIÓN DE GUARDADO DE RESULTADOS
+# # =============================================================================
 
 # Configuración para guardar resultados de modelos
 MODEL_RESULTS_CONFIG = {

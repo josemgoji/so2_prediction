@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from statsmodels.tsa.seasonal import STL
 
 from astral import LocationInfo
 from astral.sun import sun
@@ -82,6 +83,60 @@ class FeatureEngineering:
         )
         return solar
 
+    def extract_stl_features(
+        self,
+        data: pd.DataFrame,
+        period: int,
+        robust: bool = True,
+        column: str = None,
+    ) -> pd.DataFrame:
+        """
+        Extrae características STL (Seasonal and Trend decomposition using Loess).
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            DataFrame con la serie temporal
+        period : int
+            Período estacional para STL
+        robust : bool, default True
+            Si usar versión robusta de STL
+        column : str, optional
+            Columna a procesar. Si None, usa la primera columna numérica
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame con columnas stl_trend, stl_season, stl_resid
+        """
+        if column is None:
+            # Usar la primera columna numérica
+            numeric_cols = data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) == 0:
+                raise ValueError("No se encontraron columnas numéricas en el DataFrame")
+            column = numeric_cols[0]
+
+        if column not in data.columns:
+            raise ValueError(f"La columna '{column}' no existe en el DataFrame")
+
+        y = data[column].astype(float)
+
+        if len(y) >= 2 * period:
+            try:
+                res = STL(y, period=period, robust=robust).fit()
+                trend = res.trend
+                seas = res.seasonal
+                resid = res.resid
+            except Exception:
+                trend = seas = resid = np.full(len(y), np.nan)
+        else:
+            trend = seas = resid = np.full(len(y), np.nan)
+
+        return pd.DataFrame(
+            {"stl_trend": trend, "stl_season": seas, "stl_resid": resid},
+            index=data.index,
+        )
+
     def extract_window_features(
         self,
         data: pd.DataFrame,
@@ -108,11 +163,15 @@ class FeatureEngineering:
         calendar_features: pd.DataFrame,
         solar_features: pd.DataFrame,
         window_features: pd.DataFrame,
+        stl_features: pd.DataFrame = None,
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
     ) -> pd.DataFrame:
         # El trimming se aplica en el pipeline para mantener consistencia con crudos
-        return pd.concat([calendar_features, solar_features, window_features], axis=1)
+        features_list = [calendar_features, solar_features, window_features]
+        if stl_features is not None:
+            features_list.append(stl_features)
+        return pd.concat(features_list, axis=1)
 
     def create_all_features(
         self,
@@ -121,6 +180,10 @@ class FeatureEngineering:
         window_columns: List[str] = None,
         window_windows: List[str] = None,
         window_functions: List[str] = None,
+        stl_period: int = None,
+        stl_robust: bool = True,
+        stl_column: str = None,
+        use_stl: bool = False,
         trim_start: int = DEFAULT_TRIM_START,
         trim_end: int = DEFAULT_TRIM_END,
         freq: str = "h",  # fija
@@ -135,6 +198,17 @@ class FeatureEngineering:
             functions=window_functions,
             freq=freq,  # siempre 'h'
         )
+
+        # Extraer características STL si se solicita
+        stl_vars = None
+        if use_stl and stl_period is not None:
+            stl_vars = self.extract_stl_features(
+                data=data,
+                period=stl_period,
+                robust=stl_robust,
+                column=stl_column,
+            )
+
         return self.combine_exogenous_features(
-            cal_vars, solar_vars, window_vars, trim_start, trim_end
+            cal_vars, solar_vars, window_vars, stl_vars, trim_start, trim_end
         )

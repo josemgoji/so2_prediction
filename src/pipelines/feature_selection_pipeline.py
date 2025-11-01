@@ -36,7 +36,7 @@ class FeatureSelector:
         file_pattern: str = "{station}_test.csv",
         selector_type: str = "lasso",
         regressor_type: str = "lgbm",
-        lags: int = 48,
+        lags: List[int] = [1, 2, 12, 24, 48, 72, 168],
         window_features: Optional[List] = None,
         window_features_params: Optional[Dict] = None,
         selector_params: Optional[Dict] = None,
@@ -60,13 +60,13 @@ class FeatureSelector:
             Tipo de selector: "lasso" o "rfecv"
         regressor_type : str, default="lgbm"
             Tipo de regresor: "lgbm", "rf", "lasso", etc.
-        lags : int, default=48
-            Número de lags a considerar
+        lags : list, default=[1, 2, 12, 24, 48, 72, 168]
+            Lista de lags a considerar
         window_features : list, optional
             Lista de window features a usar (si se proporciona, se usa directamente)
         window_features_params : dict, optional
             Parámetros para generar window features automáticamente
-            Debe incluir: period, stats, window_sizes, fourier_k, stl_robust
+            Debe incluir: period, stats, window_sizes, fourier_k
         selector_params : dict, optional
             Parámetros específicos para el selector
         regressor_params : dict, optional

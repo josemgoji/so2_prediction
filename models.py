@@ -14,7 +14,7 @@ from src.recursos.regressors import (
     create_lasso_regressor,
 )
 from src.recursos.windows_features import (
-    FourierWindowFeatures,
+    #FourierWindowFeatures,
     CustomRollingFeatures,
 )
 from src.recursos.scorers import (
@@ -59,23 +59,27 @@ def clean_params_for_json(params_dict):
     return cleaned
 
 
-# ===== 💡 Configuración de estación =====
+# =============================================================================
+# CONFIGURACIÓN INICIAL
+# =============================================================================
 STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
-
-print(f"🚀 Ejecutando modelos para la estación: {STATION}")
-
-# ===== 💡 Configuración de regresores =====
-# Los regresores se cargan desde parsed_fields.py
 USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
+USE_WEIGHTS = False  # True para usar pesos de gaps, False para desactivar
 
-# ===== 1) Cargar datos base =====
+print(f"Ejecutando modelos para la estacion: {STATION}")
+
+# =============================================================================
+# CARGA Y PREPARACIÓN DE DATOS
+# =============================================================================
+
+# Cargar datos procesados
 df = DataManager().load_data(f"data/stage/SO2/processed/processed_{STATION}.csv")
 df = df.sort_index()
 
-# ===== 2) Configuración columns =====
+# Configuración de columnas
 TARGET_COL = "target"
 
-# ===== 3) Cargar selección desde JSON =====
+# Cargar selección de características desde JSON
 feat_sel_path = Path(
     f"data/stage/SO2/selected/lasso/con_exog/selected_cols_{STATION}_lasso_rf.json"
 )
@@ -86,32 +90,26 @@ selected_lags: list[int] = sel["selected_lags"]
 selected_window_features: list[str] = sel["selected_window_features"]
 selected_exog: list[str] = sel.get("selected_exog", [])
 
+# Verificar que todas las columnas necesarias estén presentes
 missing = [c for c in [TARGET_COL] + selected_exog if c not in df.columns]
 if missing:
     raise ValueError(f"Faltan columnas en df: {missing}")
 
-# ===== 4) Window features =====
+# =============================================================================
+# CONFIGURACIÓN DE CARACTERÍSTICAS TEMPORALES
+# =============================================================================
+
+# Definir características de ventana temporal
 window_features = [
-    FourierWindowFeatures(period=24, K=3),
+    #FourierWindowFeatures(period=24, K=3),
     CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 24, 48, 72]),
     CustomRollingFeatures(stats=["min"], window_sizes=[6, 24]),
     CustomRollingFeatures(stats=["max"], window_sizes=[6, 12, 24]),
 ]
 
-# ===== 5) Split train / val / test =====
-y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainval = (
-    split_data_by_dates(
-        df=df,
-        target_col=TARGET_COL,
-        exog_cols=selected_exog,
-        val_months=2,
-        test_months=2,
-    )
-)
-
-# ===== 6) Escalado robusto y Forecaster recursivo =====
-# Escalado log1p para estabilizar variancia (evita explosión de MAPE si hay outliers)
-TARGET_COL = "target"
+# =============================================================================
+# DIVISIÓN DE DATOS EN CONJUNTOS DE ENTRENAMIENTO, VALIDACIÓN Y PRUEBA
+# =============================================================================
 
 y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainval = (
     split_data_by_dates(
@@ -123,10 +121,11 @@ y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainv
     )
 )
 
-# ===== 💡 Control de pesos para gaps =====
-USE_WEIGHTS = True  # Cambiar a False para desactivar los pesos de gaps
+# =============================================================================
+# CONFIGURACIÓN DE PESOS PARA GAPS (OPCIONAL)
+# =============================================================================
 
-# ===== 💡 Cargar archivo de pesos y crear weight_func =====
+# Cargar archivo de pesos y crear función de pesos si está habilitado
 if USE_WEIGHTS:
     weights_path = Path(f"data/stage/SO2/marks/weights_{STATION}.csv")
     weights = pd.read_csv(weights_path, parse_dates=["datetime"]).set_index("datetime")[
@@ -142,20 +141,19 @@ if USE_WEIGHTS:
 else:
     weight_func = None
 
-# ===== 6) Configuración común para todos los regresores =====
-H = 6  # horizonte 1 paso
+# =============================================================================
+# CONFIGURACIÓN DE VALIDACIÓN CRUZADA Y ESTRUCTURA DE RESULTADOS
+# =============================================================================
+
+# Configuración común para todos los regresores
+H = 6  # Horizonte de predicción (72 horas)
 cv = TimeSeriesFold(
     steps=H,
     initial_train_size=len(y_train),
     refit=False,
 )
 
-# lags_grid = [selected_lags]
-
-# ===== 7) Iterar sobre diferentes regresores =====
-all_results = []
-
-# Crear directorio de resultados si no existe
+# Crear estructura de directorios para resultados
 results_dir = (
     Path(MODEL_RESULTS_CONFIG["analytics_dir"]) / MODEL_RESULTS_CONFIG["results_subdir"]
 )
@@ -163,7 +161,7 @@ results_dir.mkdir(parents=True, exist_ok=True)
 
 # Determinar subdirectorio basado en configuración
 exog_status = "con_exog" if USE_EXOG else "sin_exog"
-station_results_dir = results_dir / STATION / exog_status
+station_results_dir = results_dir / STATION / exog_status / f"H{H}"
 station_results_dir.mkdir(parents=True, exist_ok=True)
 
 # Crear subdirectorios específicos para cada tipo de archivo
@@ -176,19 +174,29 @@ summary_dir = station_results_dir / "summary"
 for subdir in [models_dir, plots_dir, results_dir_station, summary_dir]:
     subdir.mkdir(parents=True, exist_ok=True)
 
-print(f"\n📁 Estructura de carpetas creada para {STATION}:")
-print(f"   📂 {station_results_dir}")
-print("   ├── 📂 models/     (modelos entrenados .pkl)")
-print("   ├── 📂 plots/      (gráficos de predicciones)")
-print("   ├── 📂 results/    (resultados individuales .json)")
-print("   └── 📂 summary/    (resúmenes y comparaciones)")
-print(f"   Configuración: {exog_status}")
+print(f"\nEstructura de carpetas creada para {STATION}:")
+print(f"   {station_results_dir}")
+print("   -- models/     (modelos entrenados .pkl)")
+print("   -- plots/      (graficos de predicciones)")
+print("   -- results/    (resultados individuales .json)")
+print("   -- summary/    (resumenes y comparaciones)")
+print(f"   Configuracion: {exog_status}, Horizonte: {H}")
 print("=" * 60)
+
+# =============================================================================
+# ENTRENAMIENTO Y EVALUACIÓN DE MODELOS
+# =============================================================================
+
+all_results = []
 
 for regressor_config in REGRESSORS_CONFIG:
     regressor_name = regressor_config["name"]
     regressor_func_name = regressor_config["regressor_func"]
     param_distributions = regressor_config["params"]
+
+    print(f"\n{'=' * 60}")
+    print(f"Entrenando modelo: {regressor_name}")
+    print(f"{'=' * 60}")
 
     # Mapear nombre de función a función real
     regressor_func_map = {
@@ -200,16 +208,12 @@ for regressor_config in REGRESSORS_CONFIG:
 
     regressor_func = regressor_func_map[regressor_func_name]
 
-    print(f"\n{'=' * 60}")
-    print(f"🚀 Entrenando modelo: {regressor_name}")
-    print(f"{'=' * 60}")
-
     # Crear regressor base con parámetros por defecto
     base_regressor = regressor_func(
         random_state=FEATURE_SELECTION_CONFIG["random_state"]
     )
 
-    # ===== Forecaster recursivo =====
+    # Configurar forecaster recursivo
     forecaster_params = {
         "regressor": base_regressor,
         "lags": selected_lags,
@@ -217,23 +221,24 @@ for regressor_config in REGRESSORS_CONFIG:
         "transformer_y": FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
     }
 
-    # Solo agregar weight_func si está habilitado
+    # Agregar función de pesos si está habilitada
     if USE_WEIGHTS:
         forecaster_params["weight_func"] = weight_func
 
     forecaster = ForecasterRecursive(**forecaster_params)
 
-    # ===== Random Search =====
+    # -------------------------------------------------------------------------
+    # OPTIMIZACIÓN DE HIPERPARÁMETROS CON RANDOM SEARCH
+    # -------------------------------------------------------------------------
     try:
         results = random_search_forecaster(
             forecaster=forecaster,
             y=y_trainval,
             exog=exog_trainval,
             param_distributions=param_distributions,
-            # lags_grid=lags_grid,
             cv=cv,
             metric=wmape,
-            n_iter=10,  # Aumentado para mejor tuning
+            n_iter=10,
             random_state=FEATURE_SELECTION_CONFIG["random_state"],
             return_best=True,
             n_jobs=-1,
@@ -241,10 +246,7 @@ for regressor_config in REGRESSORS_CONFIG:
             show_progress=True,
         )
 
-        print(f"\n📊 Resultados Random Search para {regressor_name}:")
-        print(results.head())
-
-        # Extraer mejor parámetros correctamente
+        # Extraer mejor parámetros del random search
         if len(results) > 0:
             best_params = results.iloc[0].to_dict()
             # Remover columnas que no son parámetros del modelo
@@ -253,7 +255,7 @@ for regressor_config in REGRESSORS_CONFIG:
                 k: v for k, v in best_params.items() if k not in params_to_remove
             }
 
-            # Manejar específicamente el parámetro 'lags' que puede ser problemático
+            # Manejar parámetro 'lags' que puede ser problemático
             if "lags" in best_params:
                 lags_value = best_params["lags"]
                 if hasattr(lags_value, "tolist"):
@@ -261,13 +263,14 @@ for regressor_config in REGRESSORS_CONFIG:
                 elif isinstance(lags_value, np.ndarray):
                     best_params["lags"] = lags_value.tolist()
                 else:
-                    best_params["lags"] = str(
-                        lags_value
-                    )  # Convertir a string si es necesario
+                    best_params["lags"] = str(lags_value)
         else:
             best_params = {}
 
-        # ===== Validación post-hoc (train+val) =====
+        # -------------------------------------------------------------------------
+        # VALIDACIÓN EN CONJUNTO DE ENTRENAMIENTO + VALIDACIÓN
+        # -------------------------------------------------------------------------
+        
         metric_vals_tv, preds_tv = backtesting_forecaster(
             forecaster=forecaster,
             y=y_trainval,
@@ -280,63 +283,99 @@ for regressor_config in REGRESSORS_CONFIG:
             show_progress=False,
         )
 
+        # Calcular métricas de validación
         mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
         rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-
-        # Calcular stepwise MAPE para validación
         stepwise_mape_val = stepwise_mape_from_backtesting(
             preds_tv, y_trainval.loc[preds_tv.index]
         )
 
-        print(f"\n📈 Validación (train+val) - {regressor_name}:")
+        print(f"\nValidacion (train+val) - {regressor_name}:")
         print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
         print(f"RMSE: {rmse_tv:.4f}")
         print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
 
-        # ===== Evaluación en test =====
-        forecaster.fit(y=y_trainval, exog=exog_trainval)
-        y_pred = forecaster.predict(steps=len(y_test), exog=exog_test)
+        # -------------------------------------------------------------------------
+        # EVALUACIÓN EN CONJUNTO DE PRUEBA
+        # -------------------------------------------------------------------------
+        
+        cv_test = TimeSeriesFold(
+            steps=H,
+            initial_train_size=len(y_trainval),
+            refit=False,
+        )
 
-        test_rmse = rmse(y_test, y_pred)
-        test_wmape = wmape(y_test, y_pred)
+        # Realizar backtesting en conjunto de prueba
+        metric_vals_test, preds_test = backtesting_forecaster(
+            forecaster=forecaster,
+            y=df[TARGET_COL],
+            exog=df[selected_exog],
+            cv=cv_test,
+            metric=wmape,
+            return_predictors=True,
+            n_jobs=-1,
+            verbose=False,
+            show_progress=False,
+        )
 
-        # Calcular stepwise MAPE para test
-        stepwise_mape_test = stepwise_mape_on_test(y_test, y_pred, H=H)
+        y_pred = preds_test["pred"]
 
-        print(f"\n🎯 Test - {regressor_name}:")
+        # Alinear series para métricas de test
+        common_index = y_test.index.intersection(y_pred.index)
+        if len(common_index) > 0:
+            y_test_aligned = y_test.loc[common_index]
+            y_pred_aligned = y_pred.loc[common_index]
+            test_rmse = rmse(y_test_aligned, y_pred_aligned)
+            test_wmape = wmape(y_test_aligned, y_pred_aligned)
+            stepwise_mape_test = stepwise_mape_on_test(
+                y_test_aligned, y_pred_aligned, H=H
+            )
+        else:
+            print("   WARNING: No hay indices comunes para calcular metricas de test")
+            test_rmse = float("inf")
+            test_wmape = float("inf")
+            stepwise_mape_test = pd.Series(dtype=float)
+
+        print(f"\nTest - {regressor_name}:")
         print(f"RMSE: {test_rmse:.4f}")
         print(f"WMAPE %: {100 * test_wmape:.2f}")
         print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
 
-        # ===== Crear gráficos de predicciones =====
+        # -------------------------------------------------------------------------
+        # CREACIÓN DE GRÁFICOS Y GUARDADO DE RESULTADOS
+        # -------------------------------------------------------------------------
+
+        # Crear gráficos de predicciones
         try:
             plot_files = create_prediction_plots(
                 y_val=y_val,
                 preds_val=preds_tv.loc[y_val.index]
                 if len(preds_tv) > 0
                 else pd.DataFrame(),
-                y_test=y_test,
-                y_pred_test=y_pred,
+                y_test=y_test_aligned if len(common_index) > 0 else y_test,
+                y_pred_test=y_pred_aligned if len(common_index) > 0 else y_pred,
                 model_name=regressor_name,
                 station=STATION,
                 save_dir=plots_dir,
             )
-            print(f"📊 Gráficos creados exitosamente para {regressor_name}")
+            print(f"Graficos creados exitosamente para {regressor_name}")
         except Exception as e:
-            print(f"⚠️ Error creando gráficos para {regressor_name}: {str(e)}")
+            print(f"ERROR creando graficos para {regressor_name}: {str(e)}")
             plot_files = {}
 
-        # ===== Guardar modelo entrenado =====
+        # Guardar modelo entrenado
         timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        model_file = models_dir / f"{regressor_name}_model_{timestamp_str}.pkl"
+        weights_suffix = "w" if USE_WEIGHTS else "nw"
+        model_file = (
+            models_dir / f"{regressor_name}_model_{weights_suffix}_{timestamp_str}.pkl"
+        )
 
-        # Guardar el forecaster entrenado
         with open(model_file, "wb") as f:
             pickle.dump(forecaster, f)
 
-        print(f"💾 Modelo entrenado guardado en: {model_file}")
+        print(f"Modelo entrenado guardado en: {model_file}")
 
-        # Preparar datos para guardar
+        # Preparar y guardar resultados individuales
         result_data = {
             "station": STATION,
             "model_type": regressor_name,
@@ -358,16 +397,18 @@ for regressor_config in REGRESSORS_CONFIG:
             "timestamp": pd.Timestamp.now().isoformat(),
         }
 
-        # Guardar resultados individuales
-        timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        result_file = results_dir_station / f"{regressor_name}_{timestamp_str}.json"
+        # Guardar resultados individuales en JSON
+        result_file = (
+            results_dir_station
+            / f"{regressor_name}_{weights_suffix}_{timestamp_str}.json"
+        )
 
         with open(result_file, "w", encoding="utf-8") as f:
             json.dump(result_data, f, indent=2, ensure_ascii=False)
 
-        print(f"💾 Resultados guardados en: {result_file}")
+        print(f"Resultados guardados en: {result_file}")
 
-        # Guardar resultados para comparación
+        # Agregar resultados para comparación final
         all_results.append(
             {
                 "regressor": regressor_name,
@@ -384,7 +425,7 @@ for regressor_config in REGRESSORS_CONFIG:
         )
 
     except Exception as e:
-        print(f"❌ Error entrenando {regressor_name}: {str(e)}")
+        print(f"ERROR entrenando {regressor_name}: {str(e)}")
         all_results.append(
             {
                 "regressor": regressor_name,
@@ -401,18 +442,23 @@ for regressor_config in REGRESSORS_CONFIG:
             }
         )
 
-# ===== 8) Resumen de resultados =====
+# =============================================================================
+# RESUMEN FINAL Y GUARDADO DE RESULTADOS
+# =============================================================================
+
 print(f"\n{'=' * 80}")
-print(f"📋 RESUMEN DE RESULTADOS PARA ESTACIÓN: {STATION}")
+print(f"RESUMEN DE RESULTADOS PARA ESTACION: {STATION}")
 print(
-    f"🔧 Configuración: {'Con exógenas' if USE_EXOG else 'Sin exógenas'}, {'Con pesos' if USE_WEIGHTS else 'Sin pesos'}"
+    f"Configuracion: {'Con exogenas' if USE_EXOG else 'Sin exogenas'}, {'Con pesos' if USE_WEIGHTS else 'Sin pesos'}"
 )
 print(f"{'=' * 80}")
 
+# Crear DataFrame con todos los resultados y ordenar por WMAPE de test
 results_df = pd.DataFrame(all_results)
 results_df = results_df.sort_values("test_wmape")
 
-print("\n🏆 RANKING POR TEST WMAPE:")
+# Mostrar ranking de modelos
+print("\nRANKING POR TEST WMAPE:")
 for i, (_, row) in enumerate(results_df.iterrows(), 1):
     if row["test_wmape"] != float("inf"):
         print(
@@ -424,17 +470,18 @@ for i, (_, row) in enumerate(results_df.iterrows(), 1):
     else:
         print(f"{i}. {row['regressor']}: ERROR - {row.get('error', 'Unknown error')}")
 
-print(f"\n🥇 MEJOR MODELO: {results_df.iloc[0]['regressor']}")
+# Mostrar información del mejor modelo
+print(f"\nMEJOR MODELO: {results_df.iloc[0]['regressor']}")
 print(f"Test WMAPE: {100 * results_df.iloc[0]['test_wmape']:.2f}%")
 print(f"Test RMSE: {results_df.iloc[0]['test_rmse']:.4f}")
 print(f"Test Stepwise MAPE: {results_df.iloc[0]['test_stepwise_mape']}")
 print(f"Modelo guardado en: {results_df.iloc[0]['model_file']}")
 if results_df.iloc[0]["plot_files"]:
-    print("📊 Gráficos guardados:")
+    print("Graficos guardados:")
     for plot_type, plot_path in results_df.iloc[0]["plot_files"].items():
         print(f"   {plot_type}: {plot_path}")
 
-# ===== 9) Guardar resumen completo =====
+# Preparar datos del resumen completo
 summary_data = {
     "station": STATION,
     "configuration": {
@@ -455,18 +502,19 @@ summary_data = {
     },
 }
 
-# Guardar resumen completo
+# Guardar resumen completo en JSON
 timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-summary_file = summary_dir / f"summary_{timestamp_str}.json"
+weights_suffix = "w" if USE_WEIGHTS else "nw"
+summary_file = summary_dir / f"summary_{weights_suffix}_{timestamp_str}.json"
 
 with open(summary_file, "w", encoding="utf-8") as f:
     json.dump(summary_data, f, indent=2, ensure_ascii=False)
 
-print(f"\n💾 Resumen completo guardado en: {summary_file}")
+print(f"\nResumen completo guardado en: {summary_file}")
 
 # Guardar también como CSV para fácil análisis
-csv_file = summary_dir / f"results_comparison_{timestamp_str}.csv"
+csv_file = summary_dir / f"results_comparison_{weights_suffix}_{timestamp_str}.csv"
 results_df.to_csv(csv_file, index=False)
-print(f"📊 Comparación en CSV guardada en: {csv_file}")
+print(f"Comparacion en CSV guardada en: {csv_file}")
 
-print(f"\n✅ Proceso completado para estación {STATION}")
+print(f"\nProceso completado para estacion {STATION}")

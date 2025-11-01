@@ -21,7 +21,7 @@ class SkforecastFeatureSelector:
         lags: int = 48,
         window_features=None,  # Lista de window features
         regressor=None,  # Regressor pasado directamente
-        selector_type: str = "rfecv",  # "lasso" o "rfecv"
+        selector_type: str = "lasso",  # "lasso" o "rfecv"
         selector_params: dict = None,
         random_state: int = 15926,
     ):

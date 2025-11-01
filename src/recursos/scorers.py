@@ -102,7 +102,6 @@ def stepwise_mape_from_backtesting(
         denom = np.maximum(np.abs(yt), floor)
         return float(np.mean(np.abs((yt - yp) / denom)))
 
-    # pandas >= 2.2 permite include_groups=False; fallback para versiones previas
     try:
         return df_eval.groupby("h").apply(_mape, include_groups=False)
     except TypeError:

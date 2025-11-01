@@ -18,8 +18,6 @@ from src.recursos.windows_features import (
     CustomRollingFeatures,
 )
 from src.recursos.scorers import (
-    mape_overall_metric_dynamic,
-    mape_safe,
     wmape,
     rmse,
     stepwise_mape_from_backtesting,
@@ -31,7 +29,6 @@ from src.utils.plot_utils import create_prediction_plots
 from skforecast.direct import ForecasterDirect
 from skforecast.model_selection import (
     TimeSeriesFold,
-    grid_search_forecaster,
     random_search_forecaster,
     backtesting_forecaster,
 )
@@ -80,7 +77,7 @@ TARGET_COL = "target"
 
 # ===== 3) Cargar selección desde JSON =====
 feat_sel_path = Path(
-    f"data/stage/SO2/selected/lasso/con_exog/selected_cols_{STATION}_lasso_rf.json"
+    "data/stage/SO2/selected/lasso/con_exog/selected_cols_CEN-TRAF_lasso_rf.json"
 )
 with open(feat_sel_path, "r", encoding="utf-8") as f:
     sel = json.load(f)
@@ -113,7 +110,7 @@ y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainv
 )
 
 # ===== 💡 Control de pesos para gaps =====
-USE_WEIGHTS = True  # Cambiar a False para desactivar los pesos de gaps
+USE_WEIGHTS = False  # Cambiar a False para desactivar los pesos de gaps
 
 # ===== 💡 Cargar archivo de pesos y crear weight_func =====
 if USE_WEIGHTS:
@@ -132,7 +129,7 @@ else:
     weight_func = None
 
 # ===== 6) Configuración común para todos los regresores =====
-H = 6  # horizonte directo (número de pasos a modelar)
+H = 72  # horizonte directo (número de pasos a modelar)
 cv = TimeSeriesFold(
     steps=H,
     initial_train_size=len(y_train),
@@ -150,8 +147,27 @@ results_dir.mkdir(parents=True, exist_ok=True)
 
 # Determinar subdirectorio basado en configuración
 exog_status = "con_exog" if USE_EXOG else "sin_exog"
-station_results_dir = results_dir / STATION / exog_status
+station_results_dir = results_dir / STATION / exog_status / "direct"
 station_results_dir.mkdir(parents=True, exist_ok=True)
+
+# Crear subdirectorios específicos para cada tipo de archivo
+models_dir = station_results_dir / "models"
+plots_dir = station_results_dir / "plots"
+results_dir_station = station_results_dir / "results"
+summary_dir = station_results_dir / "summary"
+
+# Crear todos los subdirectorios
+for subdir in [models_dir, plots_dir, results_dir_station, summary_dir]:
+    subdir.mkdir(parents=True, exist_ok=True)
+
+print(f"\n📁 Estructura de carpetas creada (Direct) para {STATION}:")
+print(f"   📂 {station_results_dir}")
+print("   ├── 📂 models/     (modelos entrenados .pkl)")
+print("   ├── 📂 plots/      (gráficos de predicciones)")
+print("   ├── 📂 results/    (resultados individuales .json)")
+print("   └── 📂 summary/    (resúmenes y comparaciones)")
+print(f"   Configuración: {exog_status}")
+print("=" * 60)
 
 for regressor_config in REGRESSORS_CONFIG:
     regressor_name = regressor_config["name"]
@@ -305,7 +321,7 @@ for regressor_config in REGRESSORS_CONFIG:
                 y_pred_test=preds_test["pred"],
                 model_name=regressor_name,
                 station=STATION,
-                save_dir=station_results_dir,
+                save_dir=plots_dir,
             )
             print(f"📊 Gráficos creados exitosamente para {regressor_name}")
         except Exception as e:
@@ -314,9 +330,8 @@ for regressor_config in REGRESSORS_CONFIG:
 
         # ===== Guardar modelo entrenado =====
         timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        model_file = (
-            station_results_dir / f"{regressor_name}_direct_model_{timestamp_str}.pkl"
-        )
+        weights_suffix = "w" if USE_WEIGHTS else "nw"
+        model_file = models_dir / f"{regressor_name}_direct_model_{weights_suffix}_{timestamp_str}.pkl"
 
         with open(model_file, "wb") as f:
             pickle.dump(forecaster, f)
@@ -347,8 +362,9 @@ for regressor_config in REGRESSORS_CONFIG:
 
         # Guardar resultados individuales
         timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        weights_suffix = "w" if USE_WEIGHTS else "nw"
         result_file = (
-            station_results_dir / f"{regressor_name}_direct_{timestamp_str}.json"
+            results_dir_station / f"{regressor_name}_direct_{weights_suffix}_{timestamp_str}.json"
         )
 
         with open(result_file, "w", encoding="utf-8") as f:
@@ -447,7 +463,8 @@ summary_data = {
 
 # Guardar resumen completo
 timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-summary_file = station_results_dir / f"summary_direct_{timestamp_str}.json"
+weights_suffix = "w" if USE_WEIGHTS else "nw"
+summary_file = summary_dir / f"summary_direct_{weights_suffix}_{timestamp_str}.json"
 
 with open(summary_file, "w", encoding="utf-8") as f:
     json.dump(summary_data, f, indent=2, ensure_ascii=False)
@@ -455,7 +472,7 @@ with open(summary_file, "w", encoding="utf-8") as f:
 print(f"\n💾 Resumen completo guardado en: {summary_file}")
 
 # Guardar también como CSV para fácil análisis
-csv_file = station_results_dir / f"results_comparison_direct_{timestamp_str}.csv"
+csv_file = summary_dir / f"results_comparison_direct_{weights_suffix}_{timestamp_str}.csv"
 results_df.to_csv(csv_file, index=False)
 print(f"📊 Comparación en CSV guardada en: {csv_file}")
 
