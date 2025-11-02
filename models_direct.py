@@ -23,10 +23,12 @@ from src.recursos.windows_features import (
 from src.recursos.scorers import (
     wmape,
     rmse,
-    stepwise_mape_from_backtesting,
-    stepwise_mape_on_test,
+    mae,
+    mse,
+    r2,
+    stepwise_wmape_on_test,
 )
-from src.utils.data_splitter import split_data_by_dates
+from src.utils.data_splitter import split_data_by_dates, apply_target_shift
 from src.utils.plot_utils import create_prediction_plots
 from src.utils.results_manager import (
     clean_params_for_json,
@@ -40,7 +42,6 @@ from skforecast.model_selection import (
     TimeSeriesFold,
     backtesting_forecaster,
 )
-from sklearn.model_selection import TimeSeriesSplit
 
 from src.constants.parsed_fields import (
     FEATURE_SELECTION_CONFIG,
@@ -51,23 +52,24 @@ from src.constants.parsed_fields import (
 
 def train_and_evaluate_models(
     station: str,
-    horizon: int,
+    steps: int,
     use_exog: bool = True,
     n_trials: int = 20,
     study_storage: Optional[str] = None,
     val_months: int = 2,
     test_months: int = 2,
+    horizon: int = 0,
 ) -> Dict[str, Any]:
     """
-    Entrena y evalúa modelos Direct para una estación y horizonte dados.
+    Entrena y evalúa modelos Direct para una estación y steps dados.
 
     Parameters:
     -----------
     station : str
         Nombre de la estación (ej: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC")
-    horizon : int
-        Horizonte directo (número de pasos hacia adelante que se predicen simultáneamente)
-        Ejemplo: horizon=72 predice los próximos 72 pasos usando un modelo por cada paso
+    steps : int
+        Pasos directos (número de pasos hacia adelante que se predicen simultáneamente)
+        Ejemplo: steps=72 predice los próximos 72 pasos usando un modelo por cada paso
     use_exog : bool
         True para modelo con exógenas, False para sin exógenas
     n_trials : int
@@ -78,6 +80,11 @@ def train_and_evaluate_models(
         Número de meses para validación
     test_months : int
         Número de meses para test
+    horizon : int, default=0
+        Horizonte de shift del target.
+        Si horizon > 0, el target se shifteará para predecir desde el paso 'horizon'.
+        Ejemplo: horizon=24 significa que en tiempo t predecimos el valor en tiempo t+24.
+        Esto permite entrenar el modelo para predecir directamente en un tiempo futuro específico.
 
     Returns:
     --------
@@ -85,7 +92,9 @@ def train_and_evaluate_models(
         Diccionario con los resultados del entrenamiento
     """
     print(f"\n{'=' * 80}")
-    print(f"Entrenando modelos Direct para estacion: {station}, Horizonte: {horizon}")
+    print(f"Entrenando modelos Direct para estacion: {station}, Steps: {steps}")
+    if horizon > 0:
+        print(f"Horizonte de shift: {horizon}")
     print(f"{'=' * 80}")
 
     # =============================================================================
@@ -96,10 +105,16 @@ def train_and_evaluate_models(
 
     TARGET_COL = "target"
 
+    # Aplicar shift al target si horizon > 0
+    if horizon > 0:
+        print(f"\nAplicando shift al target: horizon={horizon}")
+        df = apply_target_shift(df, target_col=TARGET_COL, step=horizon)
+
     # Cargar selección de características desde JSON
     exog_status_feat = "con_exog" if use_exog else "sin_exog"
     feat_sel_path = Path(
-        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_rf.json"
+        # f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_lasso.json"
+        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_CEN-TRAF_lasso_lasso.json"
     )
 
     if not feat_sel_path.exists():
@@ -122,10 +137,10 @@ def train_and_evaluate_models(
     # CONFIGURACIÓN DE CARACTERÍSTICAS TEMPORALES
     # =============================================================================
     window_features = [
-        # FourierWindowFeatures(period=24, K=3),
-        CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 24, 48, 72]),
-        CustomRollingFeatures(stats=["min"], window_sizes=[6, 24]),
-        CustomRollingFeatures(stats=["max"], window_sizes=[6, 12, 24]),
+        CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 12, 24]),
+        CustomRollingFeatures(stats=["min"], window_sizes=[3, 6, 12]),
+        CustomRollingFeatures(stats=["max"], window_sizes=[3, 6, 12, 24, 48, 72]),
+        CustomRollingFeatures(stats=["std"], window_sizes=[3, 6, 12, 24, 72]),
     ]
 
     # =============================================================================
@@ -151,15 +166,12 @@ def train_and_evaluate_models(
     # =============================================================================
     # CV Y ESTRUCTURA DE RESULTADOS
     # =============================================================================
-    H = horizon  # Horizonte directo
+    S = steps  # Pasos directos
 
-    # Para ForecasterDirect, usamos TimeSeriesSplit similar a models.py
-    # pero adaptado para el horizonte H
-    tscv = TimeSeriesSplit(
-        n_splits=5,
-        test_size=H,
-        gap=72,
-        max_train_size=len(y_train),
+    cv = TimeSeriesFold(
+        steps=S,
+        initial_train_size=len(y_train),
+        refit=False,
     )
 
     # Carpetas de resultados
@@ -170,7 +182,9 @@ def train_and_evaluate_models(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     exog_status = "con_exog" if use_exog else "sin_exog"
-    station_results_dir = results_dir / station / exog_status / "direct" / f"H{H}"
+    station_results_dir = results_dir / station / exog_status / "direct" / f"S{S}"
+    if horizon > 0:
+        station_results_dir = station_results_dir / f"H{horizon}"
     station_results_dir.mkdir(parents=True, exist_ok=True)
 
     models_dir = station_results_dir / "models"
@@ -187,7 +201,9 @@ def train_and_evaluate_models(
     print("   -- plots/      (graficos de predicciones)")
     print("   -- results/    (resultados individuales .json)")
     print("   -- summary/    (resumenes y comparaciones)")
-    print(f"   Configuracion: {exog_status}, Horizonte Direct: {H}")
+    print(f"   Configuracion: {exog_status}, Steps Direct: {S}")
+    if horizon > 0:
+        print(f"   Horizonte de shift: {horizon}")
     print("=" * 60)
 
     # =============================================================================
@@ -238,7 +254,7 @@ def train_and_evaluate_models(
             forecaster = ForecasterDirect(
                 regressor=base_regressor,
                 lags=selected_lags,
-                steps=H,
+                steps=S,
                 window_features=window_features,
             )
 
@@ -248,7 +264,7 @@ def train_and_evaluate_models(
                     forecaster=forecaster,
                     y=y_trainval,
                     exog=exog_trainval,
-                    cv=tscv,
+                    cv=cv,
                     metric=wmape,
                     return_predictors=False,
                     n_jobs=-1,
@@ -266,7 +282,7 @@ def train_and_evaluate_models(
             direction="minimize",
             sampler=STUDY_SAMPLER,
             storage=study_storage,
-            study_name=f"{station}_{regressor_name}_direct_H{H}"
+            study_name=f"{station}_{regressor_name}_direct_S{S}"
             if study_storage
             else None,
             load_if_exists=bool(study_storage),
@@ -285,7 +301,7 @@ def train_and_evaluate_models(
         forecaster = ForecasterDirect(
             regressor=base_regressor_best,
             lags=selected_lags,
-            steps=H,
+            steps=S,
             window_features=window_features,
         )
 
@@ -297,7 +313,7 @@ def train_and_evaluate_models(
                 forecaster=forecaster,
                 y=y_trainval,
                 exog=exog_trainval,
-                cv=tscv,
+                cv=cv,
                 metric=wmape,
                 return_predictors=True,
                 n_jobs=-1,
@@ -305,26 +321,37 @@ def train_and_evaluate_models(
                 show_progress=False,
             )
 
-            mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-            rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-            stepwise_mape_val = stepwise_mape_from_backtesting(
-                preds_tv, y_trainval.loc[preds_tv.index]
+            y_trainval_aligned = y_trainval.loc[preds_tv.index]
+            preds_tv_aligned = preds_tv["pred"]
+
+            mape_overall_tv = wmape(y_trainval_aligned, preds_tv_aligned)
+            rmse_tv = rmse(y_trainval_aligned, preds_tv_aligned)
+            mae_tv = mae(y_trainval_aligned, preds_tv_aligned)
+            mse_tv = mse(y_trainval_aligned, preds_tv_aligned)
+            r2_tv = r2(y_trainval_aligned, preds_tv_aligned)
+
+            # Calcular stepwise WMAPE para validación
+            stepwise_wmape_val = stepwise_wmape_on_test(
+                y_trainval_aligned, preds_tv_aligned, H=S
             )
 
             print(f"\nValidacion (train+val) - {regressor_name}:")
-            print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
             print(f"RMSE: {rmse_tv:.4f}")
-            print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
+            print(f"MAE: {mae_tv:.4f}")
+            print(f"MSE: {mse_tv:.4f}")
+            print(f"R²: {r2_tv:.4f}")
+            print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
+            print(f"Stepwise WMAPE: {stepwise_wmape_val.to_dict()}")
 
             # ---------------------------------------------------------------------
             # TEST
             # ---------------------------------------------------------------------
-            # Para ForecasterDirect predecimos en bloques de tamaño H sobre test
+            # Para ForecasterDirect predecimos en bloques de tamaño S sobre test
             y_full = pd.concat([y_trainval, y_test])
             exog_full = pd.concat([exog_trainval, exog_test]) if use_exog else None
 
             cv_test = TimeSeriesFold(
-                steps=H,
+                steps=S,
                 initial_train_size=len(y_trainval),
                 refit=False,
             )
@@ -350,38 +377,55 @@ def train_and_evaluate_models(
                 y_test_aligned = y_test.loc[preds_test.index]
                 y_pred_aligned = preds_test["pred"]
                 test_rmse = rmse(y_test_aligned, y_pred_aligned)
+                test_mae = mae(y_test_aligned, y_pred_aligned)
+                test_mse = mse(y_test_aligned, y_pred_aligned)
+                test_r2 = r2(y_test_aligned, y_pred_aligned)
                 test_wmape = wmape(y_test_aligned, y_pred_aligned)
-                stepwise_mape_test = stepwise_mape_on_test(
-                    y_test_aligned, y_pred_aligned, H=H
+                stepwise_wmape_test = stepwise_wmape_on_test(
+                    y_test_aligned, y_pred_aligned, H=S
                 )
             else:
                 print(
                     "   WARNING: No hay indices comunes para calcular metricas de test"
                 )
                 test_rmse = float("inf")
+                test_mae = float("inf")
+                test_mse = float("inf")
+                test_r2 = float("-inf")
                 test_wmape = float("inf")
-                stepwise_mape_test = pd.Series(dtype=float)
+                stepwise_wmape_test = pd.Series(dtype=float)
                 y_test_aligned = y_test
                 y_pred_aligned = pd.Series(dtype=float)
 
             print(f"\nTest - {regressor_name}:")
             print(f"RMSE: {test_rmse:.4f}")
+            print(f"MAE: {test_mae:.4f}")
+            print(f"MSE: {test_mse:.4f}")
+            print(f"R²: {test_r2:.4f}")
             print(f"WMAPE %: {100 * test_wmape:.2f}")
-            print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
+            print(f"Stepwise WMAPE: {stepwise_wmape_test.to_dict()}")
 
             # ---------------------------------------------------------------------
             # PLOTS + SAVE
             # ---------------------------------------------------------------------
             try:
+                # Para validación: usar solo índices comunes entre y_val y preds_tv
+                if len(preds_tv) > 0:
+                    common_index_val = y_val.index.intersection(preds_tv.index)
+                    if len(common_index_val) > 0:
+                        preds_val_plot = preds_tv.loc[common_index_val]
+                    else:
+                        preds_val_plot = pd.DataFrame()
+                else:
+                    preds_val_plot = pd.DataFrame()
+
                 plot_files = create_prediction_plots(
                     y_val=y_val,
-                    preds_val=preds_tv.loc[y_val.index]
-                    if len(preds_tv) > 0
-                    else pd.DataFrame(),
+                    preds_val=preds_val_plot,
                     y_test=y_test_aligned if len(preds_test) > 0 else y_test,
                     y_pred_test=y_pred_aligned
                     if len(preds_test) > 0
-                    else pd.Series(dtype=float),
+                    else pd.Series(dtype=float, index=y_test.index),
                     model_name=regressor_name,
                     station=station,
                     save_dir=plots_dir,
@@ -393,7 +437,7 @@ def train_and_evaluate_models(
 
             # Guardar modelo
             timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-            model_file = models_dir / f"{regressor_name}_direct_{timestamp_str}.pkl"
+            model_file = models_dir / f"{regressor_name}_model_{timestamp_str}.pkl"
 
             with open(model_file, "wb") as f:
                 pickle.dump(forecaster, f)
@@ -403,18 +447,25 @@ def train_and_evaluate_models(
             # Guardar resultados individuales
             result_data = {
                 "station": station,
-                "model_type": f"{regressor_name} (Direct)",
+                "model_type": regressor_name,
                 "use_exog": use_exog,
-                "horizon": H,
+                "steps": S,
+                "horizon": horizon if horizon > 0 else None,
                 "validation_metrics": {
-                    "wmape": float(mape_overall_tv),
                     "rmse": float(rmse_tv),
-                    "stepwise_mape": stepwise_mape_val.to_dict(),
+                    "mae": float(mae_tv),
+                    "mse": float(mse_tv),
+                    "r2": float(r2_tv),
+                    "wmape": float(mape_overall_tv),
+                    "stepwise_wmape": stepwise_wmape_val.to_dict(),
                 },
                 "test_metrics": {
-                    "wmape": float(test_wmape),
                     "rmse": float(test_rmse),
-                    "stepwise_mape": stepwise_mape_test.to_dict(),
+                    "mae": float(test_mae),
+                    "mse": float(test_mse),
+                    "r2": float(test_r2),
+                    "wmape": float(test_wmape),
+                    "stepwise_wmape": stepwise_wmape_test.to_dict(),
                 },
                 "best_params": clean_params_for_json(best_params),
                 "optuna": {
@@ -439,12 +490,18 @@ def train_and_evaluate_models(
             all_results.append(
                 {
                     "regressor": regressor_name,
-                    "val_wmape": mape_overall_tv,
                     "val_rmse": rmse_tv,
-                    "val_stepwise_mape": stepwise_mape_val.to_dict(),
-                    "test_wmape": test_wmape,
+                    "val_mae": mae_tv,
+                    "val_mse": mse_tv,
+                    "val_r2": r2_tv,
+                    "val_wmape": mape_overall_tv,
+                    "val_stepwise_wmape": stepwise_wmape_val.to_dict(),
                     "test_rmse": test_rmse,
-                    "test_stepwise_mape": stepwise_mape_test.to_dict(),
+                    "test_mae": test_mae,
+                    "test_mse": test_mse,
+                    "test_r2": test_r2,
+                    "test_wmape": test_wmape,
+                    "test_stepwise_wmape": stepwise_wmape_test.to_dict(),
                     "best_params": clean_params_for_json(best_params),
                     "model_file": str(model_file),
                     "plot_files": plot_files,
@@ -459,12 +516,18 @@ def train_and_evaluate_models(
             all_results.append(
                 {
                     "regressor": regressor_name,
-                    "val_wmape": float("inf"),
                     "val_rmse": float("inf"),
-                    "val_stepwise_mape": {},
-                    "test_wmape": float("inf"),
+                    "val_mae": float("inf"),
+                    "val_mse": float("inf"),
+                    "val_r2": float("-inf"),
+                    "val_wmape": float("inf"),
+                    "val_stepwise_wmape": {},
                     "test_rmse": float("inf"),
-                    "test_stepwise_mape": {},
+                    "test_mae": float("inf"),
+                    "test_mse": float("inf"),
+                    "test_r2": float("-inf"),
+                    "test_wmape": float("inf"),
+                    "test_stepwise_wmape": {},
                     "best_params": {},
                     "model_file": None,
                     "plot_files": {},
@@ -495,11 +558,14 @@ def train_and_evaluate_models(
 
     print(f"\nResumen completo guardado en: {summary_file}")
     print(f"Comparacion en CSV guardada en: {csv_file}")
-    print(f"\n✅ Proceso completado para estacion {station}, horizonte directo {H}")
+    print(f"\n✅ Proceso completado para estacion {station}, steps directo {S}")
+    if horizon > 0:
+        print(f"   Horizonte de shift: {horizon}")
 
     return {
         "station": station,
-        "horizon": H,
+        "steps": S,
+        "horizon": horizon if horizon > 0 else None,
         "use_exog": use_exog,
         "results": all_results,
         "summary_file": str(summary_file),
@@ -515,14 +581,18 @@ if __name__ == "__main__":
     # Configuración por defecto para ejecución directa
     STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
-    HORIZON = 72  # horizonte directo (número de pasos a modelar simultáneamente)
+    STEPS = 72  # pasos directos (número de pasos a modelar simultáneamente)
     N_TRIALS = 20  # ajusta según presupuesto
     STUDY_STORAGE = None  # ej: "sqlite:///optuna.db" si quieres persistir estudios
+    HORIZON = (
+        0  # Horizonte para shift del target (0 = no shift, >0 = shift hacia adelante)
+    )
 
     result = train_and_evaluate_models(
         station=STATION,
-        horizon=HORIZON,
+        steps=STEPS,
         use_exog=USE_EXOG,
         n_trials=N_TRIALS,
         study_storage=STUDY_STORAGE,
+        horizon=HORIZON,
     )

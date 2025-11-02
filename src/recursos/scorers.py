@@ -1,6 +1,11 @@
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_squared_error, make_scorer
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
+    make_scorer,
+)
 
 
 # -----------------------
@@ -43,6 +48,27 @@ def rmse(y_true, y_pred):
     y_true = _asfloat1d(y_true)
     y_pred = _asfloat1d(y_pred)
     return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def mse(y_true, y_pred):
+    """Mean Squared Error."""
+    y_true = _asfloat1d(y_true)
+    y_pred = _asfloat1d(y_pred)
+    return float(mean_squared_error(y_true, y_pred))
+
+
+def mae(y_true, y_pred):
+    """Mean Absolute Error."""
+    y_true = _asfloat1d(y_true)
+    y_pred = _asfloat1d(y_pred)
+    return float(mean_absolute_error(y_true, y_pred))
+
+
+def r2(y_true, y_pred):
+    """R² (Coefficient of Determination)."""
+    y_true = _asfloat1d(y_true)
+    y_pred = _asfloat1d(y_pred)
+    return float(r2_score(y_true, y_pred))
 
 
 # -----------------------
@@ -114,6 +140,10 @@ def stepwise_mape_on_test(
     """
     MAPE(h) en test (fracción), agrupando por posición dentro de bloques de tamaño H (1..H).
     Soporta último bloque parcial.
+
+    NOTA: Esta función calcula MAPE (promedio de errores porcentuales), NO WMAPE.
+    Cuando H=1, todos los puntos están en h=1, pero el resultado será MAPE simple,
+    no WMAPE. Para stepwise WMAPE, usar stepwise_wmape_on_test().
     """
     n = len(y_pred)
     h = (np.arange(n) % H) + 1
@@ -133,6 +163,32 @@ def stepwise_mape_on_test(
         return df.groupby("h").apply(_mape, include_groups=False)
     except TypeError:
         return df.groupby("h", group_keys=False).apply(_mape)
+
+
+def stepwise_wmape_on_test(
+    y_true: pd.Series, y_pred: pd.Series, H: int, eps=1e-8
+) -> pd.Series:
+    """
+    WMAPE(h) en test (fracción), agrupando por posición dentro de bloques de tamaño H (1..H).
+    Soporta último bloque parcial.
+
+    Cuando H=1, todos los puntos están en h=1 y el resultado será igual al WMAPE global.
+    """
+    n = len(y_pred)
+    h = (np.arange(n) % H) + 1
+    df = pd.DataFrame(
+        {"h": h, "y_true": _asfloat1d(y_true), "y_pred": _asfloat1d(y_pred)}
+    )
+
+    def _wmape(g):
+        yt = g["y_true"].values
+        yp = g["y_pred"].values
+        return float(np.sum(np.abs(yt - yp)) / (np.sum(np.abs(yt)) + eps))
+
+    try:
+        return df.groupby("h").apply(_wmape, include_groups=False)
+    except TypeError:
+        return df.groupby("h", group_keys=False).apply(_wmape)
 
 
 # Scorers (menor = mejor)

@@ -12,7 +12,7 @@ from src.constants.parsed_fields import MODEL_RESULTS_CONFIG
 def clean_params_for_json(params_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Convierte parámetros a tipos serializables en JSON"""
     import numpy as np
-    
+
     cleaned = {}
     for key, value in params_dict.items():
         if isinstance(value, (np.integer, np.floating)):
@@ -37,7 +37,7 @@ def save_individual_result(
 ) -> Path:
     """
     Guarda los resultados individuales de un modelo en JSON
-    
+
     Parameters:
     -----------
     result_data : dict
@@ -48,7 +48,7 @@ def save_individual_result(
         Nombre del regresor
     timestamp_str : str
         Timestamp para el nombre del archivo
-        
+
     Returns:
     --------
     Path
@@ -71,7 +71,7 @@ def save_summary_and_comparison(
 ) -> tuple[Path, Path]:
     """
     Guarda el resumen completo y la comparación en CSV
-    
+
     Parameters:
     -----------
     all_results : list
@@ -84,14 +84,14 @@ def save_summary_and_comparison(
         Directorio donde guardar los archivos
     timestamp_str : str
         Timestamp para los nombres de archivo
-        
+
     Returns:
     --------
     tuple[Path, Path]
         Tupla con (ruta del summary JSON, ruta del CSV de comparación)
     """
     import numpy as np
-    
+
     results_df = pd.DataFrame(all_results)
     results_df = results_df.sort_values("test_wmape")
 
@@ -107,8 +107,8 @@ def save_summary_and_comparison(
             "name": results_df.iloc[0]["regressor"],
             "test_wmape": float(results_df.iloc[0]["test_wmape"]),
             "test_rmse": float(results_df.iloc[0]["test_rmse"]),
-            "test_stepwise_mape": results_df.iloc[0]["test_stepwise_mape"],
-            "val_stepwise_mape": results_df.iloc[0]["val_stepwise_mape"],
+            "test_stepwise_wmape": results_df.iloc[0]["test_stepwise_wmape"],
+            "val_stepwise_wmape": results_df.iloc[0]["val_stepwise_wmape"],
             "best_params": clean_params_for_json(results_df.iloc[0]["best_params"]),
             "model_file": results_df.iloc[0]["model_file"],
             "plot_files": results_df.iloc[0]["plot_files"],
@@ -133,7 +133,7 @@ def print_results_summary(
 ) -> None:
     """
     Imprime un resumen de los resultados en consola
-    
+
     Parameters:
     -----------
     all_results : list
@@ -148,9 +148,7 @@ def print_results_summary(
 
     print(f"\n{'=' * 80}")
     print(f"RESUMEN DE RESULTADOS PARA ESTACION: {station}")
-    print(
-        f"Configuracion: {'Con exogenas' if use_exog else 'Sin exogenas'}"
-    )
+    print(f"Configuracion: {'Con exogenas' if use_exog else 'Sin exogenas'}")
     print(f"{'=' * 80}")
 
     print("\nRANKING POR TEST WMAPE:")
@@ -160,17 +158,18 @@ def print_results_summary(
                 f"{i}. {row['regressor']}: WMAPE = {100 * row['test_wmape']:.2f}%, RMSE = {row['test_rmse']:.4f}"
             )
             if i == 1:
-                print(f"   Stepwise MAPE Test: {row['test_stepwise_mape']}")
+                print(f"   Stepwise WMAPE Test: {row['test_stepwise_wmape']}")
         else:
-            print(f"{i}. {row['regressor']}: ERROR - {row.get('error', 'Unknown error')}")
+            print(
+                f"{i}. {row['regressor']}: ERROR - {row.get('error', 'Unknown error')}"
+            )
 
     print(f"\nMEJOR MODELO: {results_df.iloc[0]['regressor']}")
     print(f"Test WMAPE: {100 * results_df.iloc[0]['test_wmape']:.2f}%")
     print(f"Test RMSE: {results_df.iloc[0]['test_rmse']:.4f}")
-    print(f"Test Stepwise MAPE: {results_df.iloc[0]['test_stepwise_mape']}")
+    print(f"Test Stepwise WMAPE: {results_df.iloc[0]['test_stepwise_wmape']}")
     print(f"Modelo guardado en: {results_df.iloc[0]['model_file']}")
     if results_df.iloc[0]["plot_files"]:
         print("Graficos guardados:")
         for plot_type, plot_path in results_df.iloc[0]["plot_files"].items():
             print(f"   {plot_type}: {plot_path}")
-

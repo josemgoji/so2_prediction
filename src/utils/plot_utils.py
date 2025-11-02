@@ -41,29 +41,44 @@ def create_prediction_plots(
     plots_dir = save_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
+    # Para validación: graficar TODOS los valores reales, y solo predicciones donde existan
+    # Esto permite ver dónde faltan predicciones
+    y_val_plot = y_val  # Graficar TODOS los valores reales
+    
+    if isinstance(preds_val, pd.DataFrame) and len(preds_val) > 0 and "pred" in preds_val.columns:
+        common_index_val = y_val.index.intersection(preds_val.index)
+        if len(common_index_val) > 0:
+            preds_val_plot = preds_val.loc[common_index_val]["pred"]
+        else:
+            # Si no hay índices comunes, usar valores vacíos para predicciones
+            preds_val_plot = pd.Series(dtype=float, index=pd.Index([], dtype='object'))
+    else:
+        preds_val_plot = pd.Series(dtype=float, index=pd.Index([], dtype='object'))
+
     # Crear figura para validación
     fig_val = go.Figure()
 
-    # Trazado para valores reales de validación
-    trace_val_real = go.Scatter(
-        x=y_val.index,
-        y=y_val.values,
-        name="Valor Real (Validación)",
-        mode="lines",
-        line=dict(color="blue", width=2),
-    )
+    # Trazado para valores reales de validación (TODOS los índices)
+    if len(y_val_plot) > 0:
+        trace_val_real = go.Scatter(
+            x=y_val_plot.index,
+            y=y_val_plot.values,
+            name="Valor Real (Validación)",
+            mode="lines",
+            line=dict(color="blue", width=2),
+        )
+        fig_val.add_trace(trace_val_real)
 
-    # Trazado para predicciones de validación
-    trace_val_pred = go.Scatter(
-        x=preds_val.index,
-        y=preds_val["pred"].values,
-        name="Predicción (Validación)",
-        mode="lines",
-        line=dict(color="red", width=2, dash="dash"),
-    )
-
-    fig_val.add_trace(trace_val_real)
-    fig_val.add_trace(trace_val_pred)
+    # Trazado para predicciones de validación (solo donde existan)
+    if len(preds_val_plot) > 0:
+        trace_val_pred = go.Scatter(
+            x=preds_val_plot.index,
+            y=preds_val_plot.values,
+            name="Predicción (Validación)",
+            mode="lines",
+            line=dict(color="red", width=2, dash="dash"),
+        )
+        fig_val.add_trace(trace_val_pred)
 
     fig_val.update_layout(
         title=f"Valor Real vs Predicciones - Validación - {model_name} - {station}",
@@ -79,26 +94,41 @@ def create_prediction_plots(
     # Crear figura para test
     fig_test = go.Figure()
 
-    # Trazado para valores reales de test
-    trace_test_real = go.Scatter(
-        x=y_test.index,
-        y=y_test.values,
-        name="Valor Real (Test)",
-        mode="lines",
-        line=dict(color="blue", width=2),
-    )
+    # Para test: graficar TODOS los valores reales, y solo predicciones donde existan
+    y_test_plot = y_test  # Graficar TODOS los valores reales
+    
+    if isinstance(y_pred_test, pd.Series) and len(y_pred_test) > 0:
+        common_index_test = y_test.index.intersection(y_pred_test.index)
+        if len(common_index_test) > 0:
+            # Solo las predicciones donde hay coincidencia
+            y_pred_test_plot = y_pred_test.loc[common_index_test]
+        else:
+            # Si no hay índices comunes, usar valores vacíos para predicciones
+            y_pred_test_plot = pd.Series(dtype=float, index=pd.Index([], dtype='object'))
+    else:
+        y_pred_test_plot = pd.Series(dtype=float, index=pd.Index([], dtype='object'))
 
-    # Trazado para predicciones de test
-    trace_test_pred = go.Scatter(
-        x=y_test.index,
-        y=y_pred_test.values,
-        name="Predicción (Test)",
-        mode="lines",
-        line=dict(color="red", width=2, dash="dash"),
-    )
+    # Trazado para valores reales de test (TODOS los índices)
+    if len(y_test_plot) > 0:
+        trace_test_real = go.Scatter(
+            x=y_test_plot.index,
+            y=y_test_plot.values,
+            name="Valor Real (Test)",
+            mode="lines",
+            line=dict(color="blue", width=2),
+        )
+        fig_test.add_trace(trace_test_real)
 
-    fig_test.add_trace(trace_test_real)
-    fig_test.add_trace(trace_test_pred)
+    # Trazado para predicciones de test (solo donde existan)
+    if len(y_pred_test_plot) > 0:
+        trace_test_pred = go.Scatter(
+            x=y_pred_test_plot.index,
+            y=y_pred_test_plot.values,
+            name="Predicción (Test)",
+            mode="lines",
+            line=dict(color="red", width=2, dash="dash"),
+        )
+        fig_test.add_trace(trace_test_pred)
 
     fig_test.update_layout(
         title=f"Valor Real vs Predicciones - Test - {model_name} - {station}",

@@ -24,8 +24,10 @@ from src.recursos.windows_features import (
 from src.recursos.scorers import (
     wmape,
     rmse,
-    stepwise_mape_from_backtesting,
-    stepwise_mape_on_test,
+    mae,
+    mse,
+    r2,
+    stepwise_wmape_on_test,
 )
 from src.utils.data_splitter import split_data_by_dates, apply_target_shift
 from src.utils.plot_utils import create_prediction_plots
@@ -112,7 +114,8 @@ def train_and_evaluate_models(
     # Cargar selección de características desde JSON
     exog_status_feat = "con_exog" if use_exog else "sin_exog"
     feat_sel_path = Path(
-        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_rf.json"
+        # f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_lasso.json"
+        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_CEN-TRAF_lasso_lasso.json"
     )
 
     if not feat_sel_path.exists():
@@ -135,10 +138,10 @@ def train_and_evaluate_models(
     # CONFIGURACIÓN DE CARACTERÍSTICAS TEMPORALES
     # =============================================================================
     window_features = [
-        # FourierWindowFeatures(period=24, K=3),
-        CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 24, 48, 72]),
-        CustomRollingFeatures(stats=["min"], window_sizes=[6, 24]),
-        CustomRollingFeatures(stats=["max"], window_sizes=[6, 12, 24]),
+        CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 12, 24]),
+        CustomRollingFeatures(stats=["min"], window_sizes=[3, 6, 12]),
+        CustomRollingFeatures(stats=["max"], window_sizes=[3, 6, 12, 24, 48, 72]),
+        CustomRollingFeatures(stats=["std"], window_sizes=[3, 6, 12, 24, 72]),
     ]
 
     # =============================================================================
@@ -165,12 +168,11 @@ def train_and_evaluate_models(
     # CV Y ESTRUCTURA DE RESULTADOS
     # =============================================================================
     S = step  # Step de predicción
-    
-    tscv = TimeSeriesSplit(
-        n_splits=5,
-        test_size=S,
-        gap=72,
-        max_train_size=len(y_train), 
+
+    cv = TimeSeriesFold(
+        steps=S,
+        initial_train_size=len(y_train),
+        refit=False,
     )
 
     # Carpetas de resultados
@@ -262,7 +264,7 @@ def train_and_evaluate_models(
                     forecaster=forecaster,
                     y=y_trainval,
                     exog=exog_trainval,
-                    cv=tscv,
+                    cv=cv,
                     metric=wmape,
                     return_predictors=False,
                     n_jobs=-1,
@@ -308,7 +310,7 @@ def train_and_evaluate_models(
                 forecaster=forecaster,
                 y=y_trainval,
                 exog=exog_trainval,
-                cv=tscv,
+                cv=cv,
                 metric=wmape,
                 return_predictors=True,
                 n_jobs=-1,
@@ -316,16 +318,27 @@ def train_and_evaluate_models(
                 show_progress=False,
             )
 
-            mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-            rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-            stepwise_mape_val = stepwise_mape_from_backtesting(
-                preds_tv, y_trainval.loc[preds_tv.index]
+            y_trainval_aligned = y_trainval.loc[preds_tv.index]
+            preds_tv_aligned = preds_tv["pred"]
+
+            mape_overall_tv = wmape(y_trainval_aligned, preds_tv_aligned)
+            rmse_tv = rmse(y_trainval_aligned, preds_tv_aligned)
+            mae_tv = mae(y_trainval_aligned, preds_tv_aligned)
+            mse_tv = mse(y_trainval_aligned, preds_tv_aligned)
+            r2_tv = r2(y_trainval_aligned, preds_tv_aligned)
+
+            # Calcular stepwise WMAPE para validación
+            stepwise_wmape_val = stepwise_wmape_on_test(
+                y_trainval_aligned, preds_tv_aligned, H=S
             )
 
             print(f"\nValidacion (train+val) - {regressor_name}:")
-            print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
             print(f"RMSE: {rmse_tv:.4f}")
-            print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
+            print(f"MAE: {mae_tv:.4f}")
+            print(f"MSE: {mse_tv:.4f}")
+            print(f"R²: {r2_tv:.4f}")
+            print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
+            print(f"Stepwise WMAPE: {stepwise_wmape_val.to_dict()}")
 
             # ---------------------------------------------------------------------
             # TEST
@@ -355,8 +368,11 @@ def train_and_evaluate_models(
                 y_test_aligned = y_test.loc[common_index]
                 y_pred_aligned = y_pred.loc[common_index]
                 test_rmse = rmse(y_test_aligned, y_pred_aligned)
+                test_mae = mae(y_test_aligned, y_pred_aligned)
+                test_mse = mse(y_test_aligned, y_pred_aligned)
+                test_r2 = r2(y_test_aligned, y_pred_aligned)
                 test_wmape = wmape(y_test_aligned, y_pred_aligned)
-                stepwise_mape_test = stepwise_mape_on_test(
+                stepwise_wmape_test = stepwise_wmape_on_test(
                     y_test_aligned, y_pred_aligned, H=S
                 )
             else:
@@ -364,23 +380,37 @@ def train_and_evaluate_models(
                     "   WARNING: No hay indices comunes para calcular metricas de test"
                 )
                 test_rmse = float("inf")
+                test_mae = float("inf")
+                test_mse = float("inf")
+                test_r2 = float("-inf")
                 test_wmape = float("inf")
-                stepwise_mape_test = pd.Series(dtype=float)
+                stepwise_wmape_test = pd.Series(dtype=float)
 
             print(f"\nTest - {regressor_name}:")
             print(f"RMSE: {test_rmse:.4f}")
+            print(f"MAE: {test_mae:.4f}")
+            print(f"MSE: {test_mse:.4f}")
+            print(f"R²: {test_r2:.4f}")
             print(f"WMAPE %: {100 * test_wmape:.2f}")
-            print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
+            print(f"Stepwise WMAPE: {stepwise_wmape_test.to_dict()}")
 
             # ---------------------------------------------------------------------
             # PLOTS + SAVE
             # ---------------------------------------------------------------------
             try:
+                # Para validación: usar solo índices comunes entre y_val y preds_tv
+                if len(preds_tv) > 0:
+                    common_index_val = y_val.index.intersection(preds_tv.index)
+                    if len(common_index_val) > 0:
+                        preds_val_plot = preds_tv.loc[common_index_val]
+                    else:
+                        preds_val_plot = pd.DataFrame()
+                else:
+                    preds_val_plot = pd.DataFrame()
+
                 plot_files = create_prediction_plots(
                     y_val=y_val,
-                    preds_val=preds_tv.loc[y_val.index]
-                    if len(preds_tv) > 0
-                    else pd.DataFrame(),
+                    preds_val=preds_val_plot,
                     y_test=y_test_aligned if len(common_index) > 0 else y_test,
                     y_pred_test=y_pred_aligned if len(common_index) > 0 else y_pred,
                     model_name=regressor_name,
@@ -409,14 +439,20 @@ def train_and_evaluate_models(
                 "step": S,
                 "horizon": horizon if horizon > 0 else None,
                 "validation_metrics": {
-                    "wmape": float(mape_overall_tv),
                     "rmse": float(rmse_tv),
-                    "stepwise_mape": stepwise_mape_val.to_dict(),
+                    "mae": float(mae_tv),
+                    "mse": float(mse_tv),
+                    "r2": float(r2_tv),
+                    "wmape": float(mape_overall_tv),
+                    "stepwise_wmape": stepwise_wmape_val.to_dict(),
                 },
                 "test_metrics": {
-                    "wmape": float(test_wmape),
                     "rmse": float(test_rmse),
-                    "stepwise_mape": stepwise_mape_test.to_dict(),
+                    "mae": float(test_mae),
+                    "mse": float(test_mse),
+                    "r2": float(test_r2),
+                    "wmape": float(test_wmape),
+                    "stepwise_wmape": stepwise_wmape_test.to_dict(),
                 },
                 "best_params": clean_params_for_json(best_params),
                 "optuna": {
@@ -441,12 +477,18 @@ def train_and_evaluate_models(
             all_results.append(
                 {
                     "regressor": regressor_name,
-                    "val_wmape": mape_overall_tv,
                     "val_rmse": rmse_tv,
-                    "val_stepwise_mape": stepwise_mape_val.to_dict(),
-                    "test_wmape": test_wmape,
+                    "val_mae": mae_tv,
+                    "val_mse": mse_tv,
+                    "val_r2": r2_tv,
+                    "val_wmape": mape_overall_tv,
+                    "val_stepwise_wmape": stepwise_wmape_val.to_dict(),
                     "test_rmse": test_rmse,
-                    "test_stepwise_mape": stepwise_mape_test.to_dict(),
+                    "test_mae": test_mae,
+                    "test_mse": test_mse,
+                    "test_r2": test_r2,
+                    "test_wmape": test_wmape,
+                    "test_stepwise_wmape": stepwise_wmape_test.to_dict(),
                     "best_params": clean_params_for_json(best_params),
                     "model_file": str(model_file),
                     "plot_files": plot_files,
@@ -461,12 +503,18 @@ def train_and_evaluate_models(
             all_results.append(
                 {
                     "regressor": regressor_name,
-                    "val_wmape": float("inf"),
                     "val_rmse": float("inf"),
-                    "val_stepwise_mape": {},
-                    "test_wmape": float("inf"),
+                    "val_mae": float("inf"),
+                    "val_mse": float("inf"),
+                    "val_r2": float("-inf"),
+                    "val_wmape": float("inf"),
+                    "val_stepwise_wmape": {},
                     "test_rmse": float("inf"),
-                    "test_stepwise_mape": {},
+                    "test_mae": float("inf"),
+                    "test_mse": float("inf"),
+                    "test_r2": float("-inf"),
+                    "test_wmape": float("inf"),
+                    "test_stepwise_wmape": {},
                     "best_params": {},
                     "model_file": None,
                     "plot_files": {},
