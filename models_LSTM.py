@@ -177,7 +177,7 @@ if USE_EXOG:
     assert_no_nans(exog_test, "exog_test")
 
 # Debug: Verificar formas
-print(f"\n🔍 Verificando formas de datos:")
+print("🔍 Verificando formas de datos:")
 print(f"y_train shape: {y_train.shape}")
 print(f"exog_train shape: {exog_train.shape if USE_EXOG else 'None'}")
 print(f"y_val shape: {y_val.shape}")

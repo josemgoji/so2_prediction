@@ -29,6 +29,7 @@ class LassoGridSelector(BaseEstimator):
         tol: float = 1e-3,
         random_state: int | None = 123,
         coef_threshold: float = 1e-7,
+        min_features_to_select: int = 1,
     ):
         self.alphas = alphas
         self.scorer = scorer
@@ -38,6 +39,7 @@ class LassoGridSelector(BaseEstimator):
         self.tol = tol
         self.random_state = random_state
         self.coef_threshold = coef_threshold
+        self.min_features_to_select = min_features_to_select
 
         # atributos tras fit()
         self.best_alpha_ = None
@@ -48,7 +50,6 @@ class LassoGridSelector(BaseEstimator):
 
     def fit(self, X: pd.DataFrame, y: pd.Series):
         if self.alphas is None:
-
             self.alphas = np.logspace(-6, -3, 10)
 
         self.feature_names_in_ = np.array(X.columns)
@@ -92,6 +93,18 @@ class LassoGridSelector(BaseEstimator):
 
         # Soporte: |coef| > umbral
         self.support_mask_ = self.coefs_.abs().values > self.coef_threshold
+
+        # Asegurar mínimo de features seleccionadas
+        n_selected = self.support_mask_.sum()
+        if n_selected < self.min_features_to_select:
+            # Seleccionar las top N features por valor absoluto de coeficiente
+            top_n_indices = (
+                self.coefs_.abs().nlargest(self.min_features_to_select).index
+            )
+            self.support_mask_ = np.array(
+                [col in top_n_indices for col in self.feature_names_in_]
+            )
+
         return self
 
     def get_support(self, indices: bool = False):
@@ -107,7 +120,7 @@ class LassoGridSelector(BaseEstimator):
             raise RuntimeError("Call fit() before transform().")
         keep_cols = self.feature_names_in_[self.support_mask_]
         return X.loc[:, keep_cols]
-    
+
     def get_feature_names_out(self, input_features=None):
         """
         Get output feature names for transformation.
@@ -132,15 +145,16 @@ class FeatureSelectorFactory:
         cv_splits: int = 3,
         n_jobs: int = -1,
         random_state: int | None = 123,
+        # Parámetros compartidos
+        min_features_to_select: int = 50,
         # Parámetros específicos de Lasso
         alphas=None,
-        max_iter: int = 5000,
+        max_iter: int = 20000,
         tol: float = 1e-3,
-        coef_threshold: float = 1e-8,
+        coef_threshold: float = 1e-7,
         # Parámetros específicos de RFECV
         estimator=None,
         step: int = 1,
-        min_features_to_select: int = 1,
         verbose: int = 0,
     ):
         """
@@ -159,6 +173,13 @@ class FeatureSelectorFactory:
         random_state : int, default=123
             Semilla para reproducibilidad
 
+        # Parámetros compartidos
+        min_features_to_select : int, default=1
+            Mínimo de características a seleccionar (aplica para ambos selectores).
+            - Para Lasso: Si el número de features seleccionadas es menor, se seleccionan
+              las top N por valor absoluto de coeficiente.
+            - Para RFECV: Mínimo de características que RFECV debe seleccionar.
+
         # Parámetros específicos de Lasso
         alphas : array-like, optional
             Valores de alpha para GridSearch en Lasso
@@ -174,8 +195,6 @@ class FeatureSelectorFactory:
             Estimador base para RFECV (por defecto RandomForest)
         step : int, default=1
             Número de características a eliminar en cada paso
-        min_features_to_select : int, default=1
-            Mínimo de características a seleccionar
         verbose : int, default=0
             Verbosidad para RFECV
 
@@ -195,6 +214,7 @@ class FeatureSelectorFactory:
                 tol=tol,
                 random_state=random_state,
                 coef_threshold=coef_threshold,
+                min_features_to_select=min_features_to_select,
             )
 
         elif selector_type.lower() == "rfecv":

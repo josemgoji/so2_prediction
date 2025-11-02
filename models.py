@@ -41,6 +41,7 @@ from skforecast.model_selection import (
     TimeSeriesFold,
     backtesting_forecaster,
 )
+from sklearn.model_selection import TimeSeriesSplit
 
 from src.constants.parsed_fields import (
     FEATURE_SELECTION_CONFIG,
@@ -164,10 +165,12 @@ def train_and_evaluate_models(
     # CV Y ESTRUCTURA DE RESULTADOS
     # =============================================================================
     S = step  # Step de predicción
-    cv = TimeSeriesFold(
-        steps=S,
-        initial_train_size=len(y_train),
-        refit=False,
+    
+    tscv = TimeSeriesSplit(
+        n_splits=5,
+        test_size=S,
+        gap=72,
+        max_train_size=len(y_train), 
     )
 
     # Carpetas de resultados
@@ -259,7 +262,7 @@ def train_and_evaluate_models(
                     forecaster=forecaster,
                     y=y_trainval,
                     exog=exog_trainval,
-                    cv=cv,
+                    cv=tscv,
                     metric=wmape,
                     return_predictors=False,
                     n_jobs=-1,
@@ -305,7 +308,7 @@ def train_and_evaluate_models(
                 forecaster=forecaster,
                 y=y_trainval,
                 exog=exog_trainval,
-                cv=cv,
+                cv=tscv,
                 metric=wmape,
                 return_predictors=True,
                 n_jobs=-1,

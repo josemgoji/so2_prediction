@@ -81,6 +81,7 @@ DEFAULT_WINDOW_PERIOD = 24
 DEFAULT_WINDOW_STATS = ["mean", "std", "min", "max"]
 DEFAULT_WINDOW_SIZES = [3, 6, 12, 24, 48, 72]  # Para windows_features.py (sin "h")
 DEFAULT_FOURIER_K = 3
+DEFAULT_DELTA_LAGS = [1, 6, 12, 24, 48, 72]
 
 # Configuración específica para características exógenas de ventana (usado en feature_engineering.py)
 DEFAULT_WINDOW_WINDOWS = [
@@ -92,6 +93,7 @@ DEFAULT_WINDOW_WINDOWS = [
     "72h",
 ]  # Para rolling de variables exógenas
 DEFAULT_WINDOW_FUNCTIONS = ["mean", "std"]  # Para rolling de variables exógenas
+
 
 # =============================================================================
 # CONFIGURACIÓN DE FEATURE ENGINEERING PIPELINE
@@ -124,9 +126,9 @@ FEATURE_SELECTION_CONFIG = {
     "data_path": str(STAGE_DIR / "SO2"),
     "output_path": str(STAGE_DIR / "SO2" / "selected"),
     "file_pattern": "processed_{station}.csv",
-    "selector_type": "lasso",
-    "regressor_type": "lasso",
-    "lags": list(range(1, 73)) + [168, 672],
+    "selector_type": "rfecv",
+    "regressor_type": "rf",  # options: "LGBM", "XGBoost", "Random Forest", "Lasso"
+    "lags": list(range(1, 6)) + [12, 24, 48, 72, 168, 672],
     "window_features_params": DEFAULT_WINDOW_FEATURES_PARAMS,
     "selector_params": {},
     "regressor_params": {},

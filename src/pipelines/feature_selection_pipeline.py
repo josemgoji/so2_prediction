@@ -35,7 +35,7 @@ class FeatureSelector:
         output_path: str = "data/stage/SO2/selected",
         file_pattern: str = "{station}_test.csv",
         selector_type: str = "lasso",
-        regressor_type: str = "lgbm",
+        regressor_type: str = None, # options: "LGBM", "XGBoost", "Random Forest", "Lasso"
         lags: List[int] = [1, 2, 12, 24, 48, 72, 168],
         window_features: Optional[List] = None,
         window_features_params: Optional[Dict] = None,

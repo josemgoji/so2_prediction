@@ -2,9 +2,12 @@
 import json
 import pickle
 from pathlib import Path
+from typing import Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
+
+import optuna
 
 from src.recursos.data_manager import DataManager
 from src.recursos.regressors import (
@@ -14,7 +17,7 @@ from src.recursos.regressors import (
     create_lasso_regressor,
 )
 from src.recursos.windows_features import (
-    FourierWindowFeatures,
+    # FourierWindowFeatures,
     CustomRollingFeatures,
 )
 from src.recursos.scorers import (
@@ -25,15 +28,20 @@ from src.recursos.scorers import (
 )
 from src.utils.data_splitter import split_data_by_dates
 from src.utils.plot_utils import create_prediction_plots
+from src.utils.results_manager import (
+    clean_params_for_json,
+    save_individual_result,
+    save_summary_and_comparison,
+    print_results_summary,
+)
 
 from skforecast.direct import ForecasterDirect
 from skforecast.model_selection import (
     TimeSeriesFold,
-    random_search_forecaster,
     backtesting_forecaster,
 )
+from sklearn.model_selection import TimeSeriesSplit
 
-from sklearn.preprocessing import FunctionTransformer
 from src.constants.parsed_fields import (
     FEATURE_SELECTION_CONFIG,
     REGRESSORS_CONFIG,
@@ -41,439 +49,480 @@ from src.constants.parsed_fields import (
 )
 
 
-def clean_params_for_json(params_dict):
-    """Convierte parámetros a tipos serializables en JSON"""
-    cleaned = {}
-    for key, value in params_dict.items():
-        if isinstance(value, (np.integer, np.floating)):
-            cleaned[key] = value.item()
-        elif isinstance(value, np.ndarray):
-            cleaned[key] = value.tolist()
-        elif isinstance(value, (list, tuple)):
-            cleaned[key] = [
-                v.item() if isinstance(v, (np.integer, np.floating)) else v
-                for v in value
-            ]
-        else:
-            cleaned[key] = value
-    return cleaned
+def train_and_evaluate_models(
+    station: str,
+    horizon: int,
+    use_exog: bool = True,
+    n_trials: int = 20,
+    study_storage: Optional[str] = None,
+    val_months: int = 2,
+    test_months: int = 2,
+) -> Dict[str, Any]:
+    """
+    Entrena y evalúa modelos Direct para una estación y horizonte dados.
 
+    Parameters:
+    -----------
+    station : str
+        Nombre de la estación (ej: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC")
+    horizon : int
+        Horizonte directo (número de pasos hacia adelante que se predicen simultáneamente)
+        Ejemplo: horizon=72 predice los próximos 72 pasos usando un modelo por cada paso
+    use_exog : bool
+        True para modelo con exógenas, False para sin exógenas
+    n_trials : int
+        Número de trials para Optuna
+    study_storage : str, optional
+        Storage para Optuna (ej: "sqlite:///optuna.db")
+    val_months : int
+        Número de meses para validación
+    test_months : int
+        Número de meses para test
 
-# ===== 💡 Configuración de estación =====
-STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
+    Returns:
+    --------
+    dict
+        Diccionario con los resultados del entrenamiento
+    """
+    print(f"\n{'=' * 80}")
+    print(f"Entrenando modelos Direct para estacion: {station}, Horizonte: {horizon}")
+    print(f"{'=' * 80}")
 
-print(f"🚀 Ejecutando modelos (Direct) para la estación: {STATION}")
+    # =============================================================================
+    # CARGA Y PREPARACIÓN DE DATOS
+    # =============================================================================
+    df = DataManager().load_data(f"data/stage/SO2/processed/processed_{station}.csv")
+    df = df.sort_index()
 
-# ===== 💡 Configuración de regresores =====
-# Los regresores se cargan desde parsed_fields.py
-USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
+    TARGET_COL = "target"
 
-# ===== 1) Cargar datos base =====
-df = DataManager().load_data(f"data/stage/SO2/processed/processed_{STATION}.csv")
-df = df.sort_index()
+    # Cargar selección de características desde JSON
+    exog_status_feat = "con_exog" if use_exog else "sin_exog"
+    feat_sel_path = Path(
+        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_rf.json"
+    )
 
-# ===== 2) Configuración columns =====
-TARGET_COL = "target"
+    if not feat_sel_path.exists():
+        raise FileNotFoundError(
+            f"No se encontró el archivo de características seleccionadas: {feat_sel_path}"
+        )
 
-# ===== 3) Cargar selección desde JSON =====
-feat_sel_path = Path(
-    "data/stage/SO2/selected/lasso/con_exog/selected_cols_CEN-TRAF_lasso_rf.json"
-)
-with open(feat_sel_path, "r", encoding="utf-8") as f:
-    sel = json.load(f)
+    with open(feat_sel_path, "r", encoding="utf-8") as f:
+        sel = json.load(f)
 
-selected_lags: list[int] = sel["selected_lags"]
-selected_window_features: list[str] = sel["selected_window_features"]
-selected_exog: list[str] = sel.get("selected_exog", [])
+    selected_lags: list[int] = sel["selected_lags"]
+    selected_exog: list[str] = sel.get("selected_exog", []) if use_exog else []
 
-missing = [c for c in [TARGET_COL] + selected_exog if c not in df.columns]
-if missing:
-    raise ValueError(f"Faltan columnas en df: {missing}")
+    # Verificar columnas requeridas
+    missing = [c for c in [TARGET_COL] + selected_exog if c not in df.columns]
+    if missing:
+        raise ValueError(f"Faltan columnas en df: {missing}")
 
-# ===== 4) Window features =====
-window_features = [
-    FourierWindowFeatures(period=24, K=3),
-    CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 24, 48, 72]),
-    CustomRollingFeatures(stats=["min"], window_sizes=[6, 24]),
-    CustomRollingFeatures(stats=["max"], window_sizes=[6, 12, 24]),
-]
+    # =============================================================================
+    # CONFIGURACIÓN DE CARACTERÍSTICAS TEMPORALES
+    # =============================================================================
+    window_features = [
+        # FourierWindowFeatures(period=24, K=3),
+        CustomRollingFeatures(stats=["mean"], window_sizes=[3, 6, 24, 48, 72]),
+        CustomRollingFeatures(stats=["min"], window_sizes=[6, 24]),
+        CustomRollingFeatures(stats=["max"], window_sizes=[6, 12, 24]),
+    ]
 
-# ===== 5) Split train / val / test =====
-y_train, exog_train, y_val, exog_val, y_test, exog_test, y_trainval, exog_trainval = (
-    split_data_by_dates(
+    # =============================================================================
+    # DIVISIÓN DE DATOS
+    # =============================================================================
+    (
+        y_train,
+        exog_train,
+        y_val,
+        exog_val,
+        y_test,
+        exog_test,
+        y_trainval,
+        exog_trainval,
+    ) = split_data_by_dates(
         df=df,
         target_col=TARGET_COL,
         exog_cols=selected_exog,
-        val_months=2,
-        test_months=2,
-    )
-)
-
-# ===== 💡 Control de pesos para gaps =====
-USE_WEIGHTS = False  # Cambiar a False para desactivar los pesos de gaps
-
-# ===== 💡 Cargar archivo de pesos y crear weight_func =====
-if USE_WEIGHTS:
-    weights_path = Path(f"data/stage/SO2/marks/weights_{STATION}.csv")
-    weights = pd.read_csv(weights_path, parse_dates=["datetime"]).set_index("datetime")[
-        "weight"
-    ]
-
-    def weight_func(index: pd.DatetimeIndex) -> np.ndarray:
-        """
-        Devuelve un vector de pesos alineado al índice temporal del fold actual.
-        Los huecos o zonas imputadas (weight=0) no influyen en el entrenamiento.
-        """
-        return weights.reindex(index).fillna(1.0).to_numpy()
-else:
-    weight_func = None
-
-# ===== 6) Configuración común para todos los regresores =====
-H = 72  # horizonte directo (número de pasos a modelar)
-cv = TimeSeriesFold(
-    steps=H,
-    initial_train_size=len(y_train),
-    refit=False,
-)
-
-# ===== 7) Iterar sobre diferentes regresores =====
-all_results = []
-
-# Crear directorio de resultados si no existe
-results_dir = (
-    Path(MODEL_RESULTS_CONFIG["analytics_dir"]) / MODEL_RESULTS_CONFIG["results_subdir"]
-)
-results_dir.mkdir(parents=True, exist_ok=True)
-
-# Determinar subdirectorio basado en configuración
-exog_status = "con_exog" if USE_EXOG else "sin_exog"
-station_results_dir = results_dir / STATION / exog_status / "direct"
-station_results_dir.mkdir(parents=True, exist_ok=True)
-
-# Crear subdirectorios específicos para cada tipo de archivo
-models_dir = station_results_dir / "models"
-plots_dir = station_results_dir / "plots"
-results_dir_station = station_results_dir / "results"
-summary_dir = station_results_dir / "summary"
-
-# Crear todos los subdirectorios
-for subdir in [models_dir, plots_dir, results_dir_station, summary_dir]:
-    subdir.mkdir(parents=True, exist_ok=True)
-
-print(f"\n📁 Estructura de carpetas creada (Direct) para {STATION}:")
-print(f"   📂 {station_results_dir}")
-print("   ├── 📂 models/     (modelos entrenados .pkl)")
-print("   ├── 📂 plots/      (gráficos de predicciones)")
-print("   ├── 📂 results/    (resultados individuales .json)")
-print("   └── 📂 summary/    (resúmenes y comparaciones)")
-print(f"   Configuración: {exog_status}")
-print("=" * 60)
-
-for regressor_config in REGRESSORS_CONFIG:
-    regressor_name = regressor_config["name"]
-    regressor_func_name = regressor_config["regressor_func"]
-    param_distributions = regressor_config["params"]
-
-    # Mapear nombre de función a función real
-    regressor_func_map = {
-        "create_lgbm_regressor": create_lgbm_regressor,
-        "create_xgb_regressor": create_xgb_regressor,
-        "create_rf_regressor": create_rf_regressor,
-        "create_lasso_regressor": create_lasso_regressor,
-    }
-
-    regressor_func = regressor_func_map[regressor_func_name]
-
-    print(f"\n{'=' * 60}")
-    print(f"🚀 Entrenando modelo (Direct): {regressor_name}")
-    print(f"{'=' * 60}")
-
-    # Crear regressor base con parámetros por defecto
-    base_regressor = regressor_func(
-        random_state=FEATURE_SELECTION_CONFIG["random_state"]
+        val_months=val_months,
+        test_months=test_months,
     )
 
-    # ===== Forecaster Direct =====
-    forecaster_params = {
-        "regressor": base_regressor,
-        "lags": selected_lags,
-        "steps": H,  # modela 1..H con un modelo por horizonte
-        "window_features": window_features,
-        "transformer_y": FunctionTransformer(func=np.log1p, inverse_func=np.expm1),
-    }
+    # =============================================================================
+    # CV Y ESTRUCTURA DE RESULTADOS
+    # =============================================================================
+    H = horizon  # Horizonte directo
 
-    # Solo agregar weight_func si está habilitado
-    if USE_WEIGHTS:
-        forecaster_params["weight_func"] = weight_func
+    # Para ForecasterDirect, usamos TimeSeriesSplit similar a models.py
+    # pero adaptado para el horizonte H
+    tscv = TimeSeriesSplit(
+        n_splits=5,
+        test_size=H,
+        gap=72,
+        max_train_size=len(y_train),
+    )
 
-    forecaster = ForecasterDirect(**forecaster_params)
+    # Carpetas de resultados
+    results_dir = (
+        Path(MODEL_RESULTS_CONFIG["analytics_dir"])
+        / MODEL_RESULTS_CONFIG["results_subdir"]
+    )
+    results_dir.mkdir(parents=True, exist_ok=True)
 
-    # ===== Random Search =====
-    try:
-        results = random_search_forecaster(
-            forecaster=forecaster,
-            y=y_trainval,
-            exog=exog_trainval,
-            param_distributions=param_distributions,
-            cv=cv,
-            metric=wmape,
-            n_iter=10,
-            random_state=FEATURE_SELECTION_CONFIG["random_state"],
-            return_best=True,
-            n_jobs=-1,
-            verbose=False,
-            show_progress=True,
-        )
+    exog_status = "con_exog" if use_exog else "sin_exog"
+    station_results_dir = results_dir / station / exog_status / "direct" / f"H{H}"
+    station_results_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n📊 Resultados Random Search para {regressor_name}:")
-        print(results.head())
+    models_dir = station_results_dir / "models"
+    plots_dir = station_results_dir / "plots"
+    results_dir_station = station_results_dir / "results"
+    summary_dir = station_results_dir / "summary"
 
-        # Extraer mejor parámetros correctamente
-        if len(results) > 0:
-            best_params = results.iloc[0].to_dict()
-            # Remover columnas que no son parámetros del modelo
-            params_to_remove = ["metric", "metric_std", "metric_mean"]
-            best_params = {
-                k: v for k, v in best_params.items() if k not in params_to_remove
+    for subdir in [models_dir, plots_dir, results_dir_station, summary_dir]:
+        subdir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\nEstructura de carpetas creada para {station}:")
+    print(f"   {station_results_dir}")
+    print("   -- models/     (modelos entrenados .pkl)")
+    print("   -- plots/      (graficos de predicciones)")
+    print("   -- results/    (resultados individuales .json)")
+    print("   -- summary/    (resumenes y comparaciones)")
+    print(f"   Configuracion: {exog_status}, Horizonte Direct: {H}")
+    print("=" * 60)
+
+    # =============================================================================
+    # CONFIGURACIÓN OPTUNA
+    # =============================================================================
+    STUDY_SAMPLER = optuna.samplers.TPESampler(
+        seed=FEATURE_SELECTION_CONFIG["random_state"]
+    )
+
+    # =============================================================================
+    # ENTRENAMIENTO + EVALUACIÓN (Optuna)
+    # =============================================================================
+    all_results = []
+
+    for regressor_config in REGRESSORS_CONFIG:
+        regressor_name = regressor_config["name"]
+        regressor_func_name = regressor_config["regressor_func"]
+        param_distributions = regressor_config["params"]  # solo listas → categóricos
+
+        print(f"\n{'=' * 60}")
+        print(f"Entrenando modelo Direct (Optuna): {regressor_name}")
+        print(f"{'=' * 60}")
+
+        regressor_func_map = {
+            "create_lgbm_regressor": create_lgbm_regressor,
+            "create_xgb_regressor": create_xgb_regressor,
+            "create_rf_regressor": create_rf_regressor,
+            "create_lasso_regressor": create_lasso_regressor,
+        }
+        regressor_func = regressor_func_map[regressor_func_name]
+
+        # -----------------------------
+        # Objetivo Optuna (minimiza WMAPE)
+        # -----------------------------
+        def objective(trial: optuna.Trial) -> float:
+            # 1) Sugerir hiperparámetros como categóricos (porque son listas)
+            trial_params = {
+                name: trial.suggest_categorical(name, values)
+                for name, values in param_distributions.items()
             }
 
-            if "lags" in best_params:
-                lags_value = best_params["lags"]
-                if hasattr(lags_value, "tolist"):
-                    best_params["lags"] = lags_value.tolist()
-                elif isinstance(lags_value, np.ndarray):
-                    best_params["lags"] = lags_value.tolist()
-                else:
-                    best_params["lags"] = str(lags_value)
-        else:
-            best_params = {}
-
-        # ===== Validación post-hoc (train+val) con backtesting =====
-        metric_vals_tv, preds_tv = backtesting_forecaster(
-            forecaster=forecaster,
-            y=y_trainval,
-            exog=exog_trainval,
-            cv=cv,
-            metric=wmape,
-            return_predictors=True,
-            n_jobs=-1,
-            verbose=False,
-            show_progress=False,
-        )
-
-        mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-        rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
-
-        # Calcular stepwise MAPE para validación
-        stepwise_mape_val = stepwise_mape_from_backtesting(
-            preds_tv, y_trainval.loc[preds_tv.index]
-        )
-
-        print(f"\n📈 Validación (train+val) - {regressor_name}:")
-        print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
-        print(f"RMSE: {rmse_tv:.4f}")
-        print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
-
-        # ===== Evaluación en test =====
-        # Para ForecasterDirect predecimos en bloques de tamaño H sobre test
-        y_full = pd.concat([y_trainval, y_test])
-        exog_full = pd.concat([exog_trainval, exog_test]) if USE_EXOG else None
-
-        metric_vals_test, preds_all = backtesting_forecaster(
-            forecaster=forecaster,
-            y=y_full,
-            exog=exog_full,
-            steps=H,
-            initial_train_size=len(y_trainval),
-            fixed_train_size=False,
-            refit=True,
-            metric=wmape,
-            return_predictors=True,
-            n_jobs=-1,
-            verbose=False,
-            show_progress=False,
-        )
-
-        # Filtrar sólo predicciones que caen en el rango de test
-        preds_test = preds_all.loc[preds_all.index.intersection(y_test.index)].copy()
-
-        test_rmse = rmse(y_test.loc[preds_test.index], preds_test["pred"])
-        test_wmape = wmape(y_test.loc[preds_test.index], preds_test["pred"])
-
-        # Calcular stepwise MAPE para test (usando H)
-        stepwise_mape_test = stepwise_mape_on_test(
-            y_test.loc[preds_test.index], preds_test["pred"], H=H
-        )
-
-        print(f"\n🎯 Test - {regressor_name}:")
-        print(f"RMSE: {test_rmse:.4f}")
-        print(f"WMAPE %: {100 * test_wmape:.2f}")
-        print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
-
-        # ===== Crear gráficos de predicciones =====
-        try:
-            plot_files = create_prediction_plots(
-                y_val=y_val,
-                preds_val=preds_tv.loc[y_val.index]
-                if len(preds_tv) > 0
-                else pd.DataFrame(),
-                y_test=y_test,
-                y_pred_test=preds_test["pred"],
-                model_name=regressor_name,
-                station=STATION,
-                save_dir=plots_dir,
+            # 2) Construir el regressor con seed fija
+            base_regressor = regressor_func(
+                random_state=FEATURE_SELECTION_CONFIG["random_state"], **trial_params
             )
-            print(f"📊 Gráficos creados exitosamente para {regressor_name}")
-        except Exception as e:
-            print(f"⚠️ Error creando gráficos para {regressor_name}: {str(e)}")
-            plot_files = {}
 
-        # ===== Guardar modelo entrenado =====
-        timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        weights_suffix = "w" if USE_WEIGHTS else "nw"
-        model_file = models_dir / f"{regressor_name}_direct_model_{weights_suffix}_{timestamp_str}.pkl"
+            # 3) ForecasterDirect con lags seleccionados y window_features
+            forecaster = ForecasterDirect(
+                regressor=base_regressor,
+                lags=selected_lags,
+                steps=H,
+                window_features=window_features,
+            )
 
-        with open(model_file, "wb") as f:
-            pickle.dump(forecaster, f)
+            # 4) Backtesting (si falla, penaliza)
+            try:
+                metric_vals, _ = backtesting_forecaster(
+                    forecaster=forecaster,
+                    y=y_trainval,
+                    exog=exog_trainval,
+                    cv=tscv,
+                    metric=wmape,
+                    return_predictors=False,
+                    n_jobs=-1,
+                    verbose=False,
+                    show_progress=False,
+                )
+                return float(np.mean(metric_vals))  # Optuna minimiza
+            except Exception:
+                return 1e6  # penalización
 
-        print(f"💾 Modelo entrenado guardado en: {model_file}")
+        # -----------------------------
+        # Crear estudio y optimizar
+        # -----------------------------
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=STUDY_SAMPLER,
+            storage=study_storage,
+            study_name=f"{station}_{regressor_name}_direct_H{H}"
+            if study_storage
+            else None,
+            load_if_exists=bool(study_storage),
+        )
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
-        # Preparar datos para guardar
-        result_data = {
-            "station": STATION,
-            "model_type": f"{regressor_name} (Direct)",
-            "use_exog": USE_EXOG,
-            "use_weights": USE_WEIGHTS,
-            "validation_metrics": {
-                "wmape": float(mape_overall_tv),
-                "rmse": float(rmse_tv),
-                "stepwise_mape": stepwise_mape_val.to_dict(),
-            },
-            "test_metrics": {
-                "wmape": float(test_wmape),
-                "rmse": float(test_rmse),
-                "stepwise_mape": stepwise_mape_test.to_dict(),
-            },
-            "best_params": clean_params_for_json(best_params),
-            "model_file": str(model_file),
-            "plot_files": plot_files,
-            "timestamp": pd.Timestamp.now().isoformat(),
-        }
+        # -----------------------------
+        # Re-instanciar con mejores params
+        # -----------------------------
+        best_params = dict(study.best_trial.params)
 
-        # Guardar resultados individuales
-        timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-        weights_suffix = "w" if USE_WEIGHTS else "nw"
-        result_file = (
-            results_dir_station / f"{regressor_name}_direct_{weights_suffix}_{timestamp_str}.json"
+        base_regressor_best = regressor_func(
+            random_state=FEATURE_SELECTION_CONFIG["random_state"], **best_params
         )
 
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump(result_data, f, indent=2, ensure_ascii=False)
+        forecaster = ForecasterDirect(
+            regressor=base_regressor_best,
+            lags=selected_lags,
+            steps=H,
+            window_features=window_features,
+        )
 
-        print(f"💾 Resultados guardados en: {result_file}")
+        # -------------------------------------------------------------------------
+        # VALIDACIÓN (train+val) con el mejor forecaster
+        # -------------------------------------------------------------------------
+        try:
+            metric_vals_tv, preds_tv = backtesting_forecaster(
+                forecaster=forecaster,
+                y=y_trainval,
+                exog=exog_trainval,
+                cv=tscv,
+                metric=wmape,
+                return_predictors=True,
+                n_jobs=-1,
+                verbose=False,
+                show_progress=False,
+            )
 
-        # Guardar resultados para comparación
-        all_results.append(
-            {
-                "regressor": regressor_name,
-                "val_wmape": mape_overall_tv,
-                "val_rmse": rmse_tv,
-                "val_stepwise_mape": stepwise_mape_val.to_dict(),
-                "test_wmape": test_wmape,
-                "test_rmse": test_rmse,
-                "test_stepwise_mape": stepwise_mape_test.to_dict(),
+            mape_overall_tv = wmape(y_trainval.loc[preds_tv.index], preds_tv["pred"])
+            rmse_tv = rmse(y_trainval.loc[preds_tv.index], preds_tv["pred"])
+            stepwise_mape_val = stepwise_mape_from_backtesting(
+                preds_tv, y_trainval.loc[preds_tv.index]
+            )
+
+            print(f"\nValidacion (train+val) - {regressor_name}:")
+            print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
+            print(f"RMSE: {rmse_tv:.4f}")
+            print(f"Stepwise MAPE: {stepwise_mape_val.to_dict()}")
+
+            # ---------------------------------------------------------------------
+            # TEST
+            # ---------------------------------------------------------------------
+            # Para ForecasterDirect predecimos en bloques de tamaño H sobre test
+            y_full = pd.concat([y_trainval, y_test])
+            exog_full = pd.concat([exog_trainval, exog_test]) if use_exog else None
+
+            cv_test = TimeSeriesFold(
+                steps=H,
+                initial_train_size=len(y_trainval),
+                refit=False,
+            )
+
+            metric_vals_test, preds_all = backtesting_forecaster(
+                forecaster=forecaster,
+                y=y_full,
+                exog=exog_full,
+                cv=cv_test,
+                metric=wmape,
+                return_predictors=True,
+                n_jobs=-1,
+                verbose=False,
+                show_progress=False,
+            )
+
+            # Filtrar sólo predicciones que caen en el rango de test
+            preds_test = preds_all.loc[
+                preds_all.index.intersection(y_test.index)
+            ].copy()
+
+            if len(preds_test) > 0:
+                y_test_aligned = y_test.loc[preds_test.index]
+                y_pred_aligned = preds_test["pred"]
+                test_rmse = rmse(y_test_aligned, y_pred_aligned)
+                test_wmape = wmape(y_test_aligned, y_pred_aligned)
+                stepwise_mape_test = stepwise_mape_on_test(
+                    y_test_aligned, y_pred_aligned, H=H
+                )
+            else:
+                print(
+                    "   WARNING: No hay indices comunes para calcular metricas de test"
+                )
+                test_rmse = float("inf")
+                test_wmape = float("inf")
+                stepwise_mape_test = pd.Series(dtype=float)
+                y_test_aligned = y_test
+                y_pred_aligned = pd.Series(dtype=float)
+
+            print(f"\nTest - {regressor_name}:")
+            print(f"RMSE: {test_rmse:.4f}")
+            print(f"WMAPE %: {100 * test_wmape:.2f}")
+            print(f"Stepwise MAPE: {stepwise_mape_test.to_dict()}")
+
+            # ---------------------------------------------------------------------
+            # PLOTS + SAVE
+            # ---------------------------------------------------------------------
+            try:
+                plot_files = create_prediction_plots(
+                    y_val=y_val,
+                    preds_val=preds_tv.loc[y_val.index]
+                    if len(preds_tv) > 0
+                    else pd.DataFrame(),
+                    y_test=y_test_aligned if len(preds_test) > 0 else y_test,
+                    y_pred_test=y_pred_aligned
+                    if len(preds_test) > 0
+                    else pd.Series(dtype=float),
+                    model_name=regressor_name,
+                    station=station,
+                    save_dir=plots_dir,
+                )
+                print(f"Graficos creados exitosamente para {regressor_name}")
+            except Exception as e:
+                print(f"ERROR creando graficos para {regressor_name}: {str(e)}")
+                plot_files = {}
+
+            # Guardar modelo
+            timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+            model_file = models_dir / f"{regressor_name}_direct_{timestamp_str}.pkl"
+
+            with open(model_file, "wb") as f:
+                pickle.dump(forecaster, f)
+
+            print(f"Modelo entrenado guardado en: {model_file}")
+
+            # Guardar resultados individuales
+            result_data = {
+                "station": station,
+                "model_type": f"{regressor_name} (Direct)",
+                "use_exog": use_exog,
+                "horizon": H,
+                "validation_metrics": {
+                    "wmape": float(mape_overall_tv),
+                    "rmse": float(rmse_tv),
+                    "stepwise_mape": stepwise_mape_val.to_dict(),
+                },
+                "test_metrics": {
+                    "wmape": float(test_wmape),
+                    "rmse": float(test_rmse),
+                    "stepwise_mape": stepwise_mape_test.to_dict(),
+                },
                 "best_params": clean_params_for_json(best_params),
+                "optuna": {
+                    "best_value": float(study.best_value),
+                    "best_trial": int(study.best_trial.number),
+                    "n_trials": int(len(study.trials)),
+                },
                 "model_file": str(model_file),
                 "plot_files": plot_files,
+                "timestamp": pd.Timestamp.now().isoformat(),
             }
-        )
 
-    except Exception as e:
-        print(f"❌ Error entrenando {regressor_name}: {str(e)}")
-        all_results.append(
-            {
-                "regressor": regressor_name,
-                "val_wmape": float("inf"),
-                "val_rmse": float("inf"),
-                "val_stepwise_mape": {},
-                "test_wmape": float("inf"),
-                "test_rmse": float("inf"),
-                "test_stepwise_mape": {},
-                "best_params": {},
-                "model_file": None,
-                "plot_files": {},
-                "error": str(e),
-            }
-        )
+            result_file = save_individual_result(
+                result_data=result_data,
+                results_dir=results_dir_station,
+                regressor_name=regressor_name,
+                timestamp_str=timestamp_str,
+            )
 
-# ===== 8) Resumen de resultados =====
-print(f"\n{'=' * 80}")
-print(f"📋 RESUMEN DE RESULTADOS (Direct) PARA ESTACIÓN: {STATION}")
-print(
-    f"🔧 Configuración: {'Con exógenas' if USE_EXOG else 'Sin exógenas'}, {'Con pesos' if USE_WEIGHTS else 'Sin pesos'}"
-)
-print(f"{'=' * 80}")
+            print(f"Resultados guardados en: {result_file}")
 
-results_df = pd.DataFrame(all_results)
-results_df = results_df.sort_values("test_wmape")
+            all_results.append(
+                {
+                    "regressor": regressor_name,
+                    "val_wmape": mape_overall_tv,
+                    "val_rmse": rmse_tv,
+                    "val_stepwise_mape": stepwise_mape_val.to_dict(),
+                    "test_wmape": test_wmape,
+                    "test_rmse": test_rmse,
+                    "test_stepwise_mape": stepwise_mape_test.to_dict(),
+                    "best_params": clean_params_for_json(best_params),
+                    "model_file": str(model_file),
+                    "plot_files": plot_files,
+                }
+            )
 
-print("\n🏆 RANKING POR TEST WMAPE:")
-for i, (_, row) in enumerate(results_df.iterrows(), 1):
-    if row["test_wmape"] != float("inf"):
-        print(
-            f"{i}. {row['regressor']}: WMAPE = {100 * row['test_wmape']:.2f}%, RMSE = {row['test_rmse']:.4f}"
-        )
-        if i == 1:
-            print(f"   Stepwise MAPE Test: {row['test_stepwise_mape']}")
-    else:
-        print(f"{i}. {row['regressor']}: ERROR - {row.get('error', 'Unknown error')}")
+        except Exception as e:
+            print(f"ERROR entrenando {regressor_name}: {str(e)}")
+            import traceback
 
-print(f"\n🥇 MEJOR MODELO: {results_df.iloc[0]['regressor']} (Direct)")
-print(f"Test WMAPE: {100 * results_df.iloc[0]['test_wmape']:.2f}%")
-print(f"Test RMSE: {results_df.iloc[0]['test_rmse']:.4f}")
-print(f"Test Stepwise MAPE: {results_df.iloc[0]['test_stepwise_mape']}")
-print(f"Modelo guardado en: {results_df.iloc[0]['model_file']}")
-if results_df.iloc[0]["plot_files"]:
-    print("📊 Gráficos guardados:")
-    for plot_type, plot_path in results_df.iloc[0]["plot_files"].items():
-        print(f"   {plot_type}: {plot_path}")
+            traceback.print_exc()
+            all_results.append(
+                {
+                    "regressor": regressor_name,
+                    "val_wmape": float("inf"),
+                    "val_rmse": float("inf"),
+                    "val_stepwise_mape": {},
+                    "test_wmape": float("inf"),
+                    "test_rmse": float("inf"),
+                    "test_stepwise_mape": {},
+                    "best_params": {},
+                    "model_file": None,
+                    "plot_files": {},
+                    "error": str(e),
+                }
+            )
 
-# ===== 9) Guardar resumen completo =====
-summary_data = {
-    "station": STATION,
-    "configuration": {
-        "use_exog": USE_EXOG,
-        "use_weights": USE_WEIGHTS,
-        "timestamp": pd.Timestamp.now().isoformat(),
-        "strategy": "Direct (ForecasterDirect)",
+    # =============================================================================
+    # RESUMEN FINAL
+    # =============================================================================
+    timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+
+    # Imprimir resumen en consola
+    print_results_summary(
+        all_results=all_results,
+        station=station,
+        use_exog=use_exog,
+    )
+
+    # Guardar resumen y comparación
+    summary_file, csv_file = save_summary_and_comparison(
+        all_results=all_results,
+        station=station,
+        use_exog=use_exog,
+        summary_dir=summary_dir,
+        timestamp_str=timestamp_str,
+    )
+
+    print(f"\nResumen completo guardado en: {summary_file}")
+    print(f"Comparacion en CSV guardada en: {csv_file}")
+    print(f"\n✅ Proceso completado para estacion {station}, horizonte directo {H}")
+
+    return {
+        "station": station,
         "horizon": H,
-    },
-    "results_summary": results_df.to_dict("records"),
-    "best_model": {
-        "name": results_df.iloc[0]["regressor"],
-        "test_wmape": float(results_df.iloc[0]["test_wmape"]),
-        "test_rmse": float(results_df.iloc[0]["test_rmse"]),
-        "test_stepwise_mape": results_df.iloc[0]["test_stepwise_mape"],
-        "val_stepwise_mape": results_df.iloc[0]["val_stepwise_mape"],
-        "best_params": clean_params_for_json(results_df.iloc[0]["best_params"]),
-        "model_file": results_df.iloc[0]["model_file"],
-        "plot_files": results_df.iloc[0]["plot_files"],
-    },
-}
+        "use_exog": use_exog,
+        "results": all_results,
+        "summary_file": str(summary_file),
+        "csv_file": str(csv_file),
+        "timestamp": timestamp_str,
+    }
 
-# Guardar resumen completo
-timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-weights_suffix = "w" if USE_WEIGHTS else "nw"
-summary_file = summary_dir / f"summary_direct_{weights_suffix}_{timestamp_str}.json"
 
-with open(summary_file, "w", encoding="utf-8") as f:
-    json.dump(summary_data, f, indent=2, ensure_ascii=False)
+# =============================================================================
+# EJECUCIÓN DIRECTA (para compatibilidad con ejecución antigua)
+# =============================================================================
+if __name__ == "__main__":
+    # Configuración por defecto para ejecución directa
+    STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
+    USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
+    HORIZON = 72  # horizonte directo (número de pasos a modelar simultáneamente)
+    N_TRIALS = 20  # ajusta según presupuesto
+    STUDY_STORAGE = None  # ej: "sqlite:///optuna.db" si quieres persistir estudios
 
-print(f"\n💾 Resumen completo guardado en: {summary_file}")
-
-# Guardar también como CSV para fácil análisis
-csv_file = summary_dir / f"results_comparison_direct_{weights_suffix}_{timestamp_str}.csv"
-results_df.to_csv(csv_file, index=False)
-print(f"📊 Comparación en CSV guardada en: {csv_file}")
-
-print(f"\n✅ Proceso (Direct) completado para estación {STATION}")
+    result = train_and_evaluate_models(
+        station=STATION,
+        horizon=HORIZON,
+        use_exog=USE_EXOG,
+        n_trials=N_TRIALS,
+        study_storage=STUDY_STORAGE,
+    )
