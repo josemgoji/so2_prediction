@@ -1,9 +1,9 @@
 # --- imports
 import json
 import pickle
-import warnings
+
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,6 @@ from skforecast.model_selection import (
     TimeSeriesFold,
     backtesting_forecaster,
 )
-from sklearn.model_selection import TimeSeriesSplit
 
 from src.constants.parsed_fields import (
     FEATURE_SELECTION_CONFIG,
