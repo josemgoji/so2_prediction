@@ -234,8 +234,8 @@ $RECYCLE.BIN/
 
 trash/
 test*.py
-run*.py
 era5_exports/
 data/
+!data/analytics/
 images/
 /.vscode

@@ -40,6 +40,8 @@ from src.constants.parsed_fields import (
     MODEL_RESULTS_CONFIG,
 )
 
+import optuna
+
 import torch
 
 print("PyTorch version:", torch.__version__)
@@ -56,6 +58,8 @@ def train_and_evaluate_models(
     station: str,
     steps: int,
     use_exog: bool = True,
+    n_trials: int = 20,
+    study_storage: Optional[str] = None,
     val_months: int = 2,
     test_months: int = 2,
     horizon: int = 0,
@@ -72,6 +76,10 @@ def train_and_evaluate_models(
         Pasos de predicción (horizonte)
     use_exog : bool
         True para modelo con exógenas, False para sin exógenas
+    n_trials : int
+        Número de trials para Optuna
+    study_storage : str, optional
+        Storage para Optuna (ej: "sqlite:///optuna.db")
     val_months : int
         Número de meses para validación
     test_months : int
@@ -82,6 +90,7 @@ def train_and_evaluate_models(
         Ejemplo: horizon=24 significa que en tiempo t predecimos el valor en tiempo t+24.
     param_grid : dict, optional
         Grid de hiperparámetros para búsqueda. Si None, usa valores por defecto.
+        Nota: Con Optuna, esto define los rangos/opciones para la optimización.
 
     Returns:
     --------
@@ -225,29 +234,40 @@ def train_and_evaluate_models(
     regressor_name = "LSTM"
 
     # =============================================================================
-    # BÚSQUEDA DE HIPERPARÁMETROS
+    # CONFIGURACIÓN OPTUNA
     # =============================================================================
-    from itertools import product
-
+    # Definir rangos por defecto para hiperparámetros si no se proporciona param_grid
     if param_grid is None:
         param_grid = {
-            "recurrent_units": [[100, 50], [128, 64]],
-            "dense_units": [[32, 16], [64, 32]],
-            "learning_rate": [0.01,],
-            "epochs": [8],
-            "batch_size": [128],
+            "recurrent_units": [[100, 50], [128, 64], [64, 32], [150, 75]],
+            "dense_units": [[32, 16], [64, 32], [50, 25], [16, 8]],
+            "learning_rate": [1e-4, 5e-3, 1e-3, 1e-2, 5e-2, 1e-1],
+            "epochs": [5, 8, 10, 15, 20],
+            "batch_size": [64, 128, 256],
         }
 
-    grid = list(product(*param_grid.values()))
-    results_list = []
+    # Configurar sampler de Optuna
+    STUDY_SAMPLER = optuna.samplers.TPESampler(seed=42)
 
+    # =============================================================================
+    # OPTIMIZACIÓN DE HIPERPARÁMETROS CON OPTUNA
+    # =============================================================================
     print(f"\n{'=' * 60}")
-    print(f"Búsqueda de hiperparámetros: {len(grid)} combinaciones")
+    print(f"Optimización de hiperparámetros con Optuna: {n_trials} trials")
     print(f"{'=' * 60}")
 
-    for i, params in enumerate(grid):
-        print(f"Training model {i + 1}/{len(grid)} with params: {params}")
-        rec_units, dense_units, lr, epochs, batch_size = params
+    def objective(trial: optuna.Trial) -> float:
+        """Función objetivo para Optuna: minimiza WMAPE en validación."""
+        # Sugerir hiperparámetros
+        rec_units = trial.suggest_categorical(
+            "recurrent_units", param_grid["recurrent_units"]
+        )
+        dense_units = trial.suggest_categorical(
+            "dense_units", param_grid["dense_units"]
+        )
+        lr = trial.suggest_categorical("learning_rate", param_grid["learning_rate"])
+        epochs = trial.suggest_categorical("epochs", param_grid["epochs"])
+        batch_size = trial.suggest_categorical("batch_size", param_grid["batch_size"])
 
         try:
             # Crear modelo con create_and_compile_model
@@ -311,66 +331,54 @@ def train_and_evaluate_models(
             # Alinear índices por seguridad
             y_true_val, y_pred_val_s = y_true_val.align(y_pred_val_s, join="inner")
 
-            # Calcular métricas
+            # Calcular WMAPE (métrica a minimizar)
             val_wmape = wmape(y_true_val, y_pred_val_s)
-            val_rmse = rmse(y_true_val, y_pred_val_s)
-            val_mae = mae(y_true_val, y_pred_val_s)
-            val_mse = mse(y_true_val, y_pred_val_s)
-            val_r2 = r2(y_true_val, y_pred_val_s)
 
-            print(
-                f"✅ Validación - WMAPE: {100 * val_wmape:.2f}%, RMSE: {val_rmse:.4f}, MAE: {val_mae:.4f}, MSE: {val_mse:.4f}, R²: {val_r2:.4f}"
-            )
-
-            results_list.append(
-                {
-                    "recurrent_units": rec_units,
-                    "dense_units": dense_units,
-                    "learning_rate": lr,
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "val_wmape": float(val_wmape),
-                    "val_rmse": float(val_rmse),
-                    "val_mae": float(val_mae),
-                    "val_mse": float(val_mse),
-                    "val_r2": float(val_r2),
-                }
-            )
+            return float(val_wmape)  # Optuna minimiza
 
         except Exception as e:
-            print(f"❌ Error con esta combinación: {str(e)}")
-            import traceback
+            print(f"⚠️  Trial falló: {str(e)}")
+            return 1e6  # Penalización para trials que fallan
 
-            traceback.print_exc()
-            continue
+    # Crear estudio y optimizar
+    study_name = f"{station}_{regressor_name}_lstm_S{S}"
+    if horizon > 0:
+        study_name += f"_H{horizon}"
 
-    # Verificar si se obtuvieron resultados
-    if len(results_list) == 0:
-        raise ValueError(
-            "❌ No se pudo entrenar ningún modelo. Verifica los parámetros y datos."
-        )
+    study = optuna.create_study(
+        direction="minimize",
+        sampler=STUDY_SAMPLER,
+        storage=study_storage,
+        study_name=study_name if study_storage else None,
+        load_if_exists=bool(study_storage),
+    )
 
-    results_df = pd.DataFrame(results_list).sort_values("val_wmape")
-    print("\n🏆 Mejores combinaciones de hiperparámetros:")
-    print(results_df.head())
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
 
-    best_combo = results_df.iloc[0].to_dict()
-    print(f"👉 Mejor combinación: {best_combo}")
-
-    # actualizar mejor configuración
+    # Obtener mejores parámetros
     best_params = {
-        "recurrent_units": best_combo["recurrent_units"],
-        "dense_units": best_combo["dense_units"],
-        "learning_rate": best_combo["learning_rate"],
-        "epochs": int(best_combo["epochs"]),
-        "batch_size": int(best_combo["batch_size"]),
+        "recurrent_units": study.best_params["recurrent_units"],
+        "dense_units": study.best_params["dense_units"],
+        "learning_rate": study.best_params["learning_rate"],
+        "epochs": study.best_params["epochs"],
+        "batch_size": study.best_params["batch_size"],
+    }
+
+    print(f"\n🏆 Mejor combinación encontrada (WMAPE: {study.best_value:.4f}):")
+    print(f"   {best_params}")
+
+    # Guardar información del estudio Optuna
+    optuna_info = {
+        "best_value": float(study.best_value),
+        "n_trials": len(study.trials),
+        "best_params": best_params,
     }
 
     # =============================================================================
     # ENTRENAR MODELO FINAL CON MEJORES PARÁMETROS
     # =============================================================================
     print(f"\n{'=' * 60}")
-    print(f"Entrenando modelo final con mejores parámetros...")
+    print("Entrenando modelo final con mejores parámetros...")
     print(f"{'=' * 60}")
 
     final_model = create_and_compile_model(
@@ -545,6 +553,7 @@ def train_and_evaluate_models(
             "stepwise_wmape": stepwise_wmape_test.to_dict(),
         },
         "best_params": clean_params_for_json(best_params),
+        "optuna": clean_params_for_json(optuna_info),
         "model_file": str(model_file),
         "plot_files": plot_files,
         "timestamp": pd.Timestamp.now().isoformat(),
@@ -614,7 +623,7 @@ def train_and_evaluate_models(
         "horizon": horizon if horizon > 0 else None,
         "use_exog": use_exog,
         "results": all_results,
-        "hyperparameter_search_results": results_df.to_dict("records"),
+        "optuna_study": optuna_info,
         "summary_file": str(summary_file),
         "csv_file": str(csv_file),
         "timestamp": timestamp_str,
@@ -629,6 +638,8 @@ if __name__ == "__main__":
     STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
     STEPS = 72  # pasos de predicción
+    N_TRIALS = 20  # Número de trials para Optuna
+    STUDY_STORAGE = None  # ej: "sqlite:///optuna.db" si quieres persistir estudios
     VAL_MONTHS = 2  # Meses para validación
     TEST_MONTHS = 2  # Meses para test
     HORIZON = (
@@ -639,6 +650,8 @@ if __name__ == "__main__":
         station=STATION,
         steps=STEPS,
         use_exog=USE_EXOG,
+        n_trials=N_TRIALS,
+        study_storage=STUDY_STORAGE,
         val_months=VAL_MONTHS,
         test_months=TEST_MONTHS,
         horizon=HORIZON,
