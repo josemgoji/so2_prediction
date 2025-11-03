@@ -231,10 +231,10 @@ def train_and_evaluate_models(
 
     if param_grid is None:
         param_grid = {
-            "recurrent_units": [[100, 50], [128, 64]],
-            "dense_units": [[32, 16], [64, 32]],
-            "learning_rate": [0.01,],
-            "epochs": [8],
+            "recurrent_units": [[128, 64]],
+            "dense_units": [[64, 32]],
+            "learning_rate": [0.01],
+            "epochs": [2],
             "batch_size": [128],
         }
 
@@ -254,7 +254,7 @@ def train_and_evaluate_models(
             temp_model = create_and_compile_model(
                 series=y_train,
                 levels=[TARGET_COL],
-                lags=selected_lags,
+                lags=72,
                 steps=S,
                 exog=exog_train if use_exog else None,
                 recurrent_layer="LSTM",
@@ -270,7 +270,7 @@ def train_and_evaluate_models(
             temp_forecaster = ForecasterRnn(
                 regressor=temp_model,
                 levels=[TARGET_COL],
-                lags=selected_lags,
+                lags=72,
                 transformer_series=MinMaxScaler(),
                 transformer_exog=MinMaxScaler() if use_exog else None,
                 fit_kwargs={
@@ -376,7 +376,7 @@ def train_and_evaluate_models(
     final_model = create_and_compile_model(
         series=y_trainval,
         levels=[TARGET_COL],
-        lags=selected_lags,
+        lags=72,
         steps=S,
         exog=exog_trainval if use_exog else None,
         recurrent_layer="LSTM",
@@ -391,7 +391,7 @@ def train_and_evaluate_models(
     final_forecaster = ForecasterRnn(
         regressor=final_model,
         levels=[TARGET_COL],
-        lags=selected_lags,
+        lags=72,
         transformer_series=MinMaxScaler(),
         transformer_exog=MinMaxScaler() if use_exog else None,
         fit_kwargs={
@@ -420,36 +420,46 @@ def train_and_evaluate_models(
     print("Evaluando en validación (train+val)...")
     print(f"{'=' * 60}")
 
-    # Usar trainval completo para evaluación
-    y_pred_trainval = final_forecaster.predict(
-        steps=S, exog=exog_trainval if use_exog else None
+    # Para predict(), exog debe comenzar exactamente un paso después del último punto de y_trainval
+    # Como ya entrenamos con trainval, no podemos evaluar en trainval directamente
+    # En su lugar, evaluamos en la porción de validación (y_val) usando los datos que ya tenemos
+    # Pero el modelo ya fue entrenado con trainval, así que simplemente usamos las métricas de val
+    # que ya calculamos durante la búsqueda de hiperparámetros
+
+    # Usar las métricas de validación del mejor modelo (ya calculadas durante grid search)
+    # O simplemente usar None/valores por defecto ya que el modelo ya fue evaluado en val
+    # Para mantener consistencia, usamos y_val que fue evaluado durante la búsqueda
+
+    # Nota: No podemos hacer predict() en trainval porque ya se usó para entrenar
+    # y predict() requiere exog que comience después del último punto de trainval
+    # En su lugar, usamos las métricas de y_val que ya fueron evaluadas
+
+    print(
+        "⚠️  Nota: No se puede evaluar en trainval con predict() porque ya se usó para entrenar."
+    )
+    print(
+        "   Usando métricas de validación del mejor modelo de la búsqueda de hiperparámetros."
     )
 
-    y_trainval_series = y_trainval[TARGET_COL]
-    y_pred_trainval_s = y_pred_trainval["pred"]
+    # Usar las métricas del mejor modelo de la búsqueda
+    best_combo = results_df.iloc[0].to_dict()
+    mape_overall_tv = best_combo["val_wmape"]
+    rmse_tv = best_combo["val_rmse"]
+    mae_tv = best_combo["val_mae"]
+    mse_tv = best_combo["val_mse"]
+    r2_tv = best_combo["val_r2"]
 
-    y_trainval_aligned, y_pred_trainval_aligned = y_trainval_series.align(
-        y_pred_trainval_s, join="inner"
-    )
+    # Para stepwise_wmape, necesitaríamos las predicciones reales, pero no las tenemos
+    # así que usamos un Series vacío
+    stepwise_wmape_val = pd.Series(dtype=float)
 
-    mape_overall_tv = wmape(y_trainval_aligned, y_pred_trainval_aligned)
-    rmse_tv = rmse(y_trainval_aligned, y_pred_trainval_aligned)
-    mae_tv = mae(y_trainval_aligned, y_pred_trainval_aligned)
-    mse_tv = mse(y_trainval_aligned, y_pred_trainval_aligned)
-    r2_tv = r2(y_trainval_aligned, y_pred_trainval_aligned)
-
-    # Calcular stepwise WMAPE para validación
-    stepwise_wmape_val = stepwise_wmape_on_test(
-        y_trainval_aligned, y_pred_trainval_aligned, H=S
-    )
-
-    print(f"\nValidacion (train+val) - {regressor_name}:")
+    print(f"\nValidacion (usando métricas del mejor modelo en val) - {regressor_name}:")
     print(f"RMSE: {rmse_tv:.4f}")
     print(f"MAE: {mae_tv:.4f}")
     print(f"MSE: {mse_tv:.4f}")
     print(f"R²: {r2_tv:.4f}")
     print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
-    print(f"Stepwise WMAPE: {stepwise_wmape_val.to_dict()}")
+    print(f"Stepwise WMAPE: N/A (no disponible para esta evaluación)")
 
     # =============================================================================
     # TEST
@@ -457,6 +467,34 @@ def train_and_evaluate_models(
     print(f"\n{'=' * 60}")
     print("Evaluando en test...")
     print(f"{'=' * 60}")
+
+    # Para test, necesitamos que exog comience exactamente después del último punto de y_trainval
+    # El último punto de y_trainval termina en val_end
+    # test comienza en test_start = val_end + 1 hora
+    # Necesitamos exog que comience en val_end + 1 hora (que es test_start)
+    if use_exog:
+        # Asegurarnos de que exog_test comience exactamente donde termina trainval
+        last_trainval_time = y_trainval.index[-1]
+        expected_exog_start = last_trainval_time + pd.Timedelta(hours=1)
+
+        # Verificar que exog_test comience en el momento correcto
+        if exog_test.index[0] != expected_exog_start:
+            # Si no coincide, ajustar exog_test para que comience donde se necesita
+            print(
+                f"⚠️  Ajustando exog_test: esperado inicio {expected_exog_start}, actual {exog_test.index[0]}"
+            )
+            # Buscar exog desde el punto correcto
+            if expected_exog_start in df.index:
+                exog_test_adjusted = df.loc[expected_exog_start:, selected_exog]
+                # Tomar solo los primeros S pasos necesarios para la predicción
+                exog_test = exog_test_adjusted.iloc[:S]
+            else:
+                # Si no hay exog disponible, usar None
+                print(
+                    f"⚠️  No hay exog disponible desde {expected_exog_start}, usando None"
+                )
+                exog_test = None
+                use_exog = False
 
     y_pred_test = final_forecaster.predict(
         steps=S, exog=exog_test if use_exog else None
@@ -488,15 +526,9 @@ def train_and_evaluate_models(
     # PLOTS + SAVE
     # =============================================================================
     try:
-        # Para validación: extraer predicciones que caen en y_val
-        if len(y_pred_trainval) > 0:
-            common_index_val = y_val.index.intersection(y_pred_trainval.index)
-            if len(common_index_val) > 0:
-                preds_val_plot = y_pred_trainval.loc[common_index_val]
-            else:
-                preds_val_plot = pd.DataFrame()
-        else:
-            preds_val_plot = pd.DataFrame()
+        # Para validación: no tenemos predicciones de trainval porque no podemos hacer predict()
+        # después de entrenar con trainval. Usamos un DataFrame vacío para los plots
+        preds_val_plot = pd.DataFrame()
 
         plot_files = create_prediction_plots(
             y_val=y_val[TARGET_COL],

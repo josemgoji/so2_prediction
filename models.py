@@ -569,7 +569,7 @@ if __name__ == "__main__":
     STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
     STEP = 72  # step de predicción (pasos hacia adelante que se predicen)
-    N_TRIALS = 20  # ajusta según presupuesto
+    N_TRIALS = 2  # ajusta según presupuesto
     STUDY_STORAGE = None  # ej: "sqlite:///optuna.db" si quieres persistir estudios
 
     HORIZON = (
