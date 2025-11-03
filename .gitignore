@@ -236,5 +236,6 @@ trash/
 test*.py
 era5_exports/
 data/
+!data/analytics/
 images/
 /.vscode
