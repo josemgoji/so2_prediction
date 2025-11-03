@@ -29,7 +29,9 @@ def extract_test_metrics_from_json(json_file: Path) -> Dict[str, Any]:
         data = json.load(f)
 
     test_metrics = data.get("test_metrics", {})
-    step = data.get("step")
+    step = data.get("steps") or data.get(
+        "step"
+    )  # Intentar "steps" primero, luego "step" como fallback
     model_type = data.get("model_type")
 
     return {
@@ -64,7 +66,9 @@ def extract_validation_metrics_from_json(json_file: Path) -> Dict[str, Any]:
         data = json.load(f)
 
     validation_metrics = data.get("validation_metrics", {})
-    step = data.get("step")
+    step = data.get("steps") or data.get(
+        "step"
+    )  # Intentar "steps" primero, luego "step" como fallback
     model_type = data.get("model_type")
 
     return {
@@ -161,7 +165,7 @@ def main():
     print("CONSOLIDACIÓN DE MÉTRICAS DE TEST Y VALIDACIÓN")
     print("=" * 80)
 
-    base_dir = Path("data/analytics/model_results/CEN-TRAF/con_exog")
+    base_dir = Path("data/analytics/model_results/CEN-TRAF/con_exog/direct")
 
     if not base_dir.exists():
         print(f"❌ Error: No existe el directorio {base_dir}")
@@ -179,7 +183,7 @@ def main():
     df_test = consolidate_metrics(base_dir, metric_type="test")
 
     if not df_test.empty:
-        output_file_test = base_dir / "test_metrics_all_steps.csv"
+        output_file_test = base_dir / "test_metrics_all_steps_direct.csv"
         df_test.to_csv(output_file_test, index=False)
 
         print("\n" + "=" * 80)
@@ -205,7 +209,7 @@ def main():
     df_validation = consolidate_metrics(base_dir, metric_type="validation")
 
     if not df_validation.empty:
-        output_file_validation = base_dir / "validation_metrics_all_steps.csv"
+        output_file_validation = base_dir / "validation_metrics_all_steps_direct.csv"
         df_validation.to_csv(output_file_validation, index=False)
 
         print("\n" + "=" * 80)
@@ -227,12 +231,14 @@ def main():
     print("\n\n" + "=" * 80)
     print("RESUMEN FINAL")
     print("=" * 80)
-    
+
     if not df_test.empty:
-        print(f"✅ CSV de TEST: {base_dir / 'test_metrics_all_steps.csv'}")
+        print(f"✅ CSV de TEST: {base_dir / 'test_metrics_all_steps_direct.csv'}")
     if not df_validation.empty:
-        print(f"✅ CSV de VALIDACIÓN: {base_dir / 'validation_metrics_all_steps.csv'}")
-    
+        print(
+            f"✅ CSV de VALIDACIÓN: {base_dir / 'validation_metrics_all_steps_direct.csv'}"
+        )
+
     print("=" * 80)
 
 
