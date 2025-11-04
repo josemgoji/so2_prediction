@@ -182,7 +182,7 @@ def train_and_evaluate_models(
             "recurrent_units": [[128, 64]],
             "dense_units": [[64, 32]],
             "learning_rate": [0.01],
-            "epochs": [2],
+            "epochs": [5],
             "batch_size": [128],
         }
 
@@ -280,7 +280,7 @@ def train_and_evaluate_models(
         exog=exog_bt,  # exógenas alineadas (o None)
         cv=cv,
         levels=[TARGET_COL],
-        metric="mean_absolute_error",  # cambia si prefieres
+        metric=wmape,  # usando wmape en lugar de mean_absolute_error
         suppress_warnings=True,
         verbose=False,
     )
