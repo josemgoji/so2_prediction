@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import numpy as np
 import pandas as pd
 
 from sklearn.preprocessing import MinMaxScaler
@@ -35,10 +36,9 @@ from src.utils.results_manager import (
 
 from skforecast.deep_learning import ForecasterRnn
 from skforecast.deep_learning import create_and_compile_model
+from skforecast.model_selection import backtesting_forecaster_multiseries
 
-from src.constants.parsed_fields import (
-    MODEL_RESULTS_CONFIG,
-)
+from src.constants.parsed_fields import MODEL_RESULTS_CONFIG
 
 import torch
 
@@ -52,6 +52,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Device:", device)
 
 
+# =============================================================================
+# Función principal
+# =============================================================================
 def train_and_evaluate_models(
     station: str,
     steps: int,
@@ -61,35 +64,8 @@ def train_and_evaluate_models(
     horizon: int = 0,
     param_grid: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Entrena y evalúa modelos LSTM para una estación y steps dados.
-
-    Parameters:
-    -----------
-    station : str
-        Nombre de la estación (ej: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC")
-    steps : int
-        Pasos de predicción (horizonte)
-    use_exog : bool
-        True para modelo con exógenas, False para sin exógenas
-    val_months : int
-        Número de meses para validación
-    test_months : int
-        Número de meses para test
-    horizon : int, default=0
-        Horizonte de shift del target.
-        Si horizon > 0, el target se shifteará para predecir desde el paso 'horizon'.
-        Ejemplo: horizon=24 significa que en tiempo t predecimos el valor en tiempo t+24.
-    param_grid : dict, optional
-        Grid de hiperparámetros para búsqueda. Si None, usa valores por defecto.
-
-    Returns:
-    --------
-    dict
-        Diccionario con los resultados del entrenamiento
-    """
     print(f"\n{'=' * 80}")
-    print(f"Entrenando modelos LSTM para estacion: {station}, Steps: {steps}")
+    print(f"Entrenando modelos LSTM para estación: {station}, Steps: {steps}")
     if horizon > 0:
         print(f"Horizonte de shift: {horizon}")
     print(f"{'=' * 80}")
@@ -102,42 +78,32 @@ def train_and_evaluate_models(
 
     TARGET_COL = "target"
 
-    # Aplicar shift al target si horizon > 0
     if horizon > 0:
         print(f"\nAplicando shift al target: horizon={horizon}")
         df = apply_target_shift(df, target_col=TARGET_COL, step=horizon)
 
-    # Cargar selección de características desde JSON
     exog_status_feat = "con_exog" if use_exog else "sin_exog"
     feat_sel_path = Path(
-        # f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_lasso.json"
-        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_CEN-TRAF_lasso_lasso.json"
+        f"data/stage/SO2/selected/lasso/{exog_status_feat}/selected_cols_{station}_lasso_lasso.json"
     )
 
     if not feat_sel_path.exists():
-        raise FileNotFoundError(
-            f"No se encontró el archivo de características seleccionadas: {feat_sel_path}"
-        )
+        raise FileNotFoundError(f"No se encontró {feat_sel_path}")
 
     with open(feat_sel_path, "r", encoding="utf-8") as f:
         sel = json.load(f)
 
-    selected_lags: list[int] = sel["selected_lags"]
-    selected_exog: list[str] = sel.get("selected_exog", []) if use_exog else []
+    # --- Forzamos lag consistente
+    SELECTED_LAGS = 72
+    selected_lags = SELECTED_LAGS
+    selected_exog = sel.get("selected_exog", []) if use_exog else []
 
-    # Verificar columnas requeridas
     missing = [c for c in [TARGET_COL] + selected_exog if c not in df.columns]
     if missing:
         raise ValueError(f"Faltan columnas en df: {missing}")
 
     # =============================================================================
-    # CONFIGURACIÓN DE CARACTERÍSTICAS TEMPORALES
-    # =============================================================================
-    # Nota: window_features declaradas pero no usadas directamente en LSTM
-    # (las características ya están incluidas en los lags y exog seleccionados)
-
-    # =============================================================================
-    # DIVISIÓN DE DATOS
+    # SPLIT DE DATOS
     # =============================================================================
     (
         y_train,
@@ -156,76 +122,57 @@ def train_and_evaluate_models(
         test_months=test_months,
     )
 
-    # Convertir las series a DataFrame (requisito de skforecast)
     y_train = y_train.to_frame(name=TARGET_COL)
     y_val = y_val.to_frame(name=TARGET_COL)
     y_test = y_test.to_frame(name=TARGET_COL)
     y_trainval = y_trainval.to_frame(name=TARGET_COL)
 
-    # Chequeo rápido de NaNs
+    # =============================================================================
+    # CHEQUEO NaNs
+    # =============================================================================
     def assert_no_nans(df_obj, name):
         if df_obj is None:
             return
         if isinstance(df_obj, pd.DataFrame) and df_obj.isnull().any().any():
-            n = int(df_obj.isnull().sum().sum())
-            raise ValueError(
-                f"Se encontraron {n} NaNs en {name}. Imputa/filtra antes de entrenar."
-            )
+            raise ValueError(f"Se encontraron NaNs en {name}")
         elif isinstance(df_obj, pd.Series) and df_obj.isnull().any():
-            n = int(df_obj.isnull().sum())
-            raise ValueError(
-                f"Se encontraron {n} NaNs en {name}. Imputa/filtra antes de entrenar."
-            )
+            raise ValueError(f"Se encontraron NaNs en {name}")
 
-    assert_no_nans(y_train, "y_train")
-    assert_no_nans(y_val, "y_val")
-    assert_no_nans(y_test, "y_test")
-    if use_exog:
-        assert_no_nans(exog_train, "exog_train")
-        assert_no_nans(exog_val, "exog_val")
-        assert_no_nans(exog_test, "exog_test")
+    for obj, name in [
+        (y_train, "y_train"),
+        (y_val, "y_val"),
+        (y_test, "y_test"),
+        (exog_train, "exog_train" if use_exog else None),
+    ]:
+        if name:
+            assert_no_nans(obj, name)
 
     # =============================================================================
-    # ESTRUCTURA DE RESULTADOS
+    # CONFIGURACIÓN RESULTADOS
     # =============================================================================
-    S = steps  # Pasos de predicción
+    S = steps
+    exog_status = "con_exog" if use_exog else "sin_exog"
 
-    # Carpetas de resultados
     results_dir = (
         Path(MODEL_RESULTS_CONFIG["analytics_dir"])
         / MODEL_RESULTS_CONFIG["results_subdir"]
     )
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    exog_status = "con_exog" if use_exog else "sin_exog"
     station_results_dir = results_dir / station / exog_status / "lstm" / f"S{S}"
     if horizon > 0:
         station_results_dir = station_results_dir / f"H{horizon}"
-    station_results_dir.mkdir(parents=True, exist_ok=True)
+
+    for sub in ["models", "plots", "results", "summary"]:
+        (station_results_dir / sub).mkdir(parents=True, exist_ok=True)
 
     models_dir = station_results_dir / "models"
     plots_dir = station_results_dir / "plots"
     results_dir_station = station_results_dir / "results"
     summary_dir = station_results_dir / "summary"
 
-    for subdir in [models_dir, plots_dir, results_dir_station, summary_dir]:
-        subdir.mkdir(parents=True, exist_ok=True)
-
-    print(f"\nEstructura de carpetas creada para {station}:")
-    print(f"   {station_results_dir}")
-    print("   -- models/     (modelos entrenados .pkl)")
-    print("   -- plots/      (graficos de predicciones)")
-    print("   -- results/    (resultados individuales .json)")
-    print("   -- summary/    (resumenes y comparaciones)")
-    print(f"   Configuracion: {exog_status}, Steps: {S}")
-    if horizon > 0:
-        print(f"   Horizonte de shift: {horizon}")
-    print("=" * 60)
-
     regressor_name = "LSTM"
 
     # =============================================================================
-    # BÚSQUEDA DE HIPERPARÁMETROS
+    # BÚSQUEDA DE HIPERPARÁMETROS (grid corto)
     # =============================================================================
     from itertools import product
 
@@ -238,145 +185,136 @@ def train_and_evaluate_models(
             "batch_size": [128],
         }
 
+    print("\n" + "=" * 80)
+    print("BÚSQUEDA DE HIPERPARÁMETROS")
+    print("=" * 80)
+
     grid = list(product(*param_grid.values()))
     results_list = []
 
-    print(f"\n{'=' * 60}")
-    print(f"Búsqueda de hiperparámetros: {len(grid)} combinaciones")
-    print(f"{'=' * 60}")
-
-    for i, params in enumerate(grid):
-        print(f"Training model {i + 1}/{len(grid)} with params: {params}")
-        rec_units, dense_units, lr, epochs, batch_size = params
-
-        try:
-            # Crear modelo con create_and_compile_model
-            temp_model = create_and_compile_model(
-                series=y_train,
-                levels=[TARGET_COL],
-                lags=72,
-                steps=S,
-                exog=exog_train if use_exog else None,
-                recurrent_layer="LSTM",
-                recurrent_units=rec_units,
-                dense_units=dense_units,
-                compile_kwargs={
-                    "optimizer": Adam(learning_rate=lr),
-                    "loss": MeanSquaredError(),
-                },
-            )
-
-            # Crear forecaster con el modelo
-            temp_forecaster = ForecasterRnn(
-                regressor=temp_model,
-                levels=[TARGET_COL],
-                lags=72,
-                transformer_series=MinMaxScaler(),
-                transformer_exog=MinMaxScaler() if use_exog else None,
-                fit_kwargs={
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "verbose": 0,
-                    "callbacks": [
-                        EarlyStopping(
-                            monitor="loss",
-                            patience=5,
-                            restore_best_weights=True,
-                            verbose=0,
-                        ),
-                        ReduceLROnPlateau(
-                            monitor="loss",
-                            factor=0.5,
-                            patience=3,
-                            min_lr=1e-6,
-                            verbose=0,
-                        ),
-                    ],
-                    "validation_split": 0.1,
-                },
-            )
-
-            # Fit (series y exog con mismo índice)
-            temp_forecaster.fit(series=y_train, exog=exog_train if use_exog else None)
-
-            # Predicción en validación
-            y_pred_val = temp_forecaster.predict(
-                steps=S, exog=exog_val if use_exog else None
-            )
-
-            # ======== VALIDACIÓN ========
-            y_true_val = y_val[TARGET_COL]  # DataFrame → Series
-            y_pred_val_s = y_pred_val["pred"]  # tomar solo la columna pred
-
-            # Alinear índices por seguridad
-            y_true_val, y_pred_val_s = y_true_val.align(y_pred_val_s, join="inner")
-
-            # Calcular métricas
-            val_wmape = wmape(y_true_val, y_pred_val_s)
-            val_rmse = rmse(y_true_val, y_pred_val_s)
-            val_mae = mae(y_true_val, y_pred_val_s)
-            val_mse = mse(y_true_val, y_pred_val_s)
-            val_r2 = r2(y_true_val, y_pred_val_s)
-
-            print(
-                f"✅ Validación - WMAPE: {100 * val_wmape:.2f}%, RMSE: {val_rmse:.4f}, MAE: {val_mae:.4f}, MSE: {val_mse:.4f}, R²: {val_r2:.4f}"
-            )
-
-            results_list.append(
-                {
-                    "recurrent_units": rec_units,
-                    "dense_units": dense_units,
-                    "learning_rate": lr,
-                    "epochs": epochs,
-                    "batch_size": batch_size,
-                    "val_wmape": float(val_wmape),
-                    "val_rmse": float(val_rmse),
-                    "val_mae": float(val_mae),
-                    "val_mse": float(val_mse),
-                    "val_r2": float(val_r2),
-                }
-            )
-
-        except Exception as e:
-            print(f"❌ Error con esta combinación: {str(e)}")
-            import traceback
-
-            traceback.print_exc()
-            continue
-
-    # Verificar si se obtuvieron resultados
-    if len(results_list) == 0:
-        raise ValueError(
-            "❌ No se pudo entrenar ningún modelo. Verifica los parámetros y datos."
-        )
-
-    results_df = pd.DataFrame(results_list).sort_values("val_wmape")
-    print("\n🏆 Mejores combinaciones de hiperparámetros:")
-    print(results_df.head())
-
-    best_combo = results_df.iloc[0].to_dict()
-    print(f"👉 Mejor combinación: {best_combo}")
-
-    # actualizar mejor configuración
+    # =============================================================================
+    # MODO RÁPIDO: Usar primer parámetro del grid directamente (sin búsqueda)
+    # COMENTAR ESTE BLOQUE cuando se descomente la búsqueda de hiperparámetros
+    # =============================================================================
+    # Extraer primer conjunto de parámetros del grid
+    first_params = grid[0]
+    rec_units, dense_units, lr, epochs, batch_size = first_params
     best_params = {
-        "recurrent_units": best_combo["recurrent_units"],
-        "dense_units": best_combo["dense_units"],
-        "learning_rate": best_combo["learning_rate"],
-        "epochs": int(best_combo["epochs"]),
-        "batch_size": int(best_combo["batch_size"]),
+        "recurrent_units": rec_units,
+        "dense_units": dense_units,
+        "learning_rate": lr,
+        "epochs": int(epochs),
+        "batch_size": int(batch_size),
+    }
+    best_combo = {
+        "val_wmape": 0.0,  # Placeholder cuando no hay búsqueda
     }
 
+    print("\n" + "=" * 80)
+    print("PARÁMETROS SELECCIONADOS (modo rápido)")
+    print("=" * 80)
+    for k, v in best_params.items():
+        print(f"  {k}: {v}")
+
     # =============================================================================
-    # ENTRENAR MODELO FINAL CON MEJORES PARÁMETROS
+    # BÚSQUEDA DE HIPERPARÁMETROS (descomentar para activar)
+    # DESCOMENTAR ESTE BLOQUE y comentar el bloque "MODO RÁPIDO" arriba
     # =============================================================================
-    print(f"\n{'=' * 60}")
-    print(f"Entrenando modelo final con mejores parámetros...")
-    print(f"{'=' * 60}")
+    # for i, params in enumerate(grid, 1):
+    #     rec_units, dense_units, lr, epochs, batch_size = params
+    #     print(
+    #         f"\n[{i}/{len(grid)}] Probando: rec={rec_units}, dense={dense_units}, "
+    #         f"lr={lr}, epochs={epochs}, batch={batch_size}"
+    #     )
+
+    #     try:
+    #         temp_model = create_and_compile_model(
+    #             series=y_train,
+    #             levels=[TARGET_COL],
+    #             lags=selected_lags,
+    #             steps=S,
+    #             exog=exog_train if use_exog else None,
+    #             recurrent_layer="LSTM",
+    #             recurrent_units=rec_units,
+    #             dense_units=dense_units,
+    #             compile_kwargs={
+    #                 "optimizer": Adam(learning_rate=lr),
+    #                 "loss": MeanSquaredError(),
+    #             },
+    #         )
+
+    #         temp_forecaster = ForecasterRnn(
+    #             regressor=temp_model,
+    #             levels=[TARGET_COL],
+    #             lags=selected_lags,
+    #             transformer_series=MinMaxScaler(),
+    #             transformer_exog=MinMaxScaler() if use_exog else None,
+    #             fit_kwargs={
+    #                 "epochs": epochs,
+    #                 "batch_size": batch_size,
+    #                 "verbose": 0,
+    #                 "validation_split": 0.1,
+    #             },
+    #         )
+
+    #         temp_forecaster.fit(series=y_train, exog=exog_train if use_exog else None)
+
+    #         # Predicción simple en validación para selección de modelo
+    #         y_pred_val = temp_forecaster.predict(
+    #             steps=S, exog=exog_val if use_exog else None
+    #         )
+    #         y_true_val, y_pred_val_s = y_val[TARGET_COL].align(
+    #             y_pred_val["pred"], join="inner"
+    #         )
+
+    #         val_wmape = wmape(y_true_val, y_pred_val_s)
+    #         print(f"   ✓ WMAPE validación: {100 * val_wmape:.2f}%")
+
+    #         results_list.append(
+    #             dict(
+    #                 recurrent_units=rec_units,
+    #                 dense_units=dense_units,
+    #                 learning_rate=lr,
+    #                 epochs=epochs,
+    #                 batch_size=batch_size,
+    #                 val_wmape=float(val_wmape),
+    #             )
+    #         )
+
+    #     except Exception as e:
+    #         print(f"   ❌ Error en combo {params}: {e}")
+    #
+    # if not results_list:
+    #     raise ValueError("No se pudo entrenar ningún modelo.")
+    #
+    # results_df = pd.DataFrame(results_list).sort_values("val_wmape")
+    # best_combo = results_df.iloc[0].to_dict()
+    # best_params = {
+    #     "recurrent_units": best_combo["recurrent_units"],
+    #     "dense_units": best_combo["dense_units"],
+    #     "learning_rate": best_combo["learning_rate"],
+    #     "epochs": int(best_combo["epochs"]),
+    #     "batch_size": int(best_combo["batch_size"]),
+    # }
+    #
+    # print("\n" + "=" * 80)
+    # print("MEJORES HIPERPARÁMETROS")
+    # print("=" * 80)
+    # for k, v in best_params.items():
+    #     print(f"  {k}: {v}")
+    # print(f"  WMAPE validación: {100 * best_combo['val_wmape']:.2f}%")
+
+    # =============================================================================
+    # ENTRENAMIENTO MODELO FINAL CON MEJORES PARÁMETROS
+    # =============================================================================
+    print("\n" + "=" * 80)
+    print("ENTRENAMIENTO MODELO FINAL (train+val)")
+    print("=" * 80)
 
     final_model = create_and_compile_model(
         series=y_trainval,
         levels=[TARGET_COL],
-        lags=72,
+        lags=selected_lags,
         steps=S,
         exog=exog_trainval if use_exog else None,
         recurrent_layer="LSTM",
@@ -391,281 +329,197 @@ def train_and_evaluate_models(
     final_forecaster = ForecasterRnn(
         regressor=final_model,
         levels=[TARGET_COL],
-        lags=72,
+        lags=selected_lags,
         transformer_series=MinMaxScaler(),
         transformer_exog=MinMaxScaler() if use_exog else None,
         fit_kwargs={
             "epochs": best_params["epochs"],
             "batch_size": best_params["batch_size"],
             "verbose": 1,
-            "callbacks": [
-                EarlyStopping(
-                    monitor="loss", patience=5, restore_best_weights=True, verbose=1
-                ),
-                ReduceLROnPlateau(
-                    monitor="loss", factor=0.5, patience=3, min_lr=1e-6, verbose=1
-                ),
-            ],
             "validation_split": 0.1,
         },
     )
 
-    # Entrenar con train+val
     final_forecaster.fit(series=y_trainval, exog=exog_trainval if use_exog else None)
 
-    # =============================================================================
-    # VALIDACIÓN (train+val) CON EL MEJOR FORECASTER
-    # =============================================================================
-    print(f"\n{'=' * 60}")
-    print("Evaluando en validación (train+val)...")
-    print(f"{'=' * 60}")
-
-    # Para predict(), exog debe comenzar exactamente un paso después del último punto de y_trainval
-    # Como ya entrenamos con trainval, no podemos evaluar en trainval directamente
-    # En su lugar, evaluamos en la porción de validación (y_val) usando los datos que ya tenemos
-    # Pero el modelo ya fue entrenado con trainval, así que simplemente usamos las métricas de val
-    # que ya calculamos durante la búsqueda de hiperparámetros
-
-    # Usar las métricas de validación del mejor modelo (ya calculadas durante grid search)
-    # O simplemente usar None/valores por defecto ya que el modelo ya fue evaluado en val
-    # Para mantener consistencia, usamos y_val que fue evaluado durante la búsqueda
-
-    # Nota: No podemos hacer predict() en trainval porque ya se usó para entrenar
-    # y predict() requiere exog que comience después del último punto de trainval
-    # En su lugar, usamos las métricas de y_val que ya fueron evaluadas
-
-    print(
-        "⚠️  Nota: No se puede evaluar en trainval con predict() porque ya se usó para entrenar."
-    )
-    print(
-        "   Usando métricas de validación del mejor modelo de la búsqueda de hiperparámetros."
-    )
-
-    # Usar las métricas del mejor modelo de la búsqueda
-    best_combo = results_df.iloc[0].to_dict()
-    mape_overall_tv = best_combo["val_wmape"]
-    rmse_tv = best_combo["val_rmse"]
-    mae_tv = best_combo["val_mae"]
-    mse_tv = best_combo["val_mse"]
-    r2_tv = best_combo["val_r2"]
-
-    # Para stepwise_wmape, necesitaríamos las predicciones reales, pero no las tenemos
-    # así que usamos un Series vacío
-    stepwise_wmape_val = pd.Series(dtype=float)
-
-    print(f"\nValidacion (usando métricas del mejor modelo en val) - {regressor_name}:")
-    print(f"RMSE: {rmse_tv:.4f}")
-    print(f"MAE: {mae_tv:.4f}")
-    print(f"MSE: {mse_tv:.4f}")
-    print(f"R²: {r2_tv:.4f}")
-    print(f"WMAPE %: {(100 * mape_overall_tv):.2f}")
-    print(f"Stepwise WMAPE: N/A (no disponible para esta evaluación)")
+    print("✓ Modelo final entrenado")
 
     # =============================================================================
-    # TEST
+    # BACKTESTING EN TEST
     # =============================================================================
-    print(f"\n{'=' * 60}")
-    print("Evaluando en test...")
-    print(f"{'=' * 60}")
+    print("\n" + "=" * 80)
+    print("BACKTESTING EN PERÍODO DE TEST")
+    print("=" * 80)
 
-    # Para test, necesitamos que exog comience exactamente después del último punto de y_trainval
-    # El último punto de y_trainval termina en val_end
-    # test comienza en test_start = val_end + 1 hora
-    # Necesitamos exog que comience en val_end + 1 hora (que es test_start)
-    if use_exog:
-        # Asegurarnos de que exog_test comience exactamente donde termina trainval
-        last_trainval_time = y_trainval.index[-1]
-        expected_exog_start = last_trainval_time + pd.Timedelta(hours=1)
+    # Inicializar variables para evitar UnboundLocalError
+    predictions_test = None
+    y_pred_test = None
+    y_true_test = None
+    y_pred_test_s = None
+    wmape_test = np.inf
+    rmse_test = None
+    mae_test = None
+    r2_test = None
+    mse_test = None
+    stepwise_wmape_test = {}
 
-        # Verificar que exog_test comience en el momento correcto
-        if exog_test.index[0] != expected_exog_start:
-            # Si no coincide, ajustar exog_test para que comience donde se necesita
-            print(
-                f"⚠️  Ajustando exog_test: esperado inicio {expected_exog_start}, actual {exog_test.index[0]}"
-            )
-            # Buscar exog desde el punto correcto
-            if expected_exog_start in df.index:
-                exog_test_adjusted = df.loc[expected_exog_start:, selected_exog]
-                # Tomar solo los primeros S pasos necesarios para la predicción
-                exog_test = exog_test_adjusted.iloc[:S]
-            else:
-                # Si no hay exog disponible, usar None
-                print(
-                    f"⚠️  No hay exog disponible desde {expected_exog_start}, usando None"
-                )
-                exog_test = None
-                use_exog = False
-
-    y_pred_test = final_forecaster.predict(
-        steps=S, exog=exog_test if use_exog else None
-    )
-
-    y_true_test = y_test[TARGET_COL]
-    y_pred_test_s = y_pred_test["pred"]
-
-    y_test_aligned, y_pred_test_aligned = y_true_test.align(y_pred_test_s, join="inner")
-
-    test_rmse = rmse(y_test_aligned, y_pred_test_aligned)
-    test_mae = mae(y_test_aligned, y_pred_test_aligned)
-    test_mse = mse(y_test_aligned, y_pred_test_aligned)
-    test_r2 = r2(y_test_aligned, y_pred_test_aligned)
-    test_wmape = wmape(y_test_aligned, y_pred_test_aligned)
-    stepwise_wmape_test = stepwise_wmape_on_test(
-        y_test_aligned, y_pred_test_aligned, H=S
-    )
-
-    print(f"\nTest - {regressor_name}:")
-    print(f"RMSE: {test_rmse:.4f}")
-    print(f"MAE: {test_mae:.4f}")
-    print(f"MSE: {test_mse:.4f}")
-    print(f"R²: {test_r2:.4f}")
-    print(f"WMAPE %: {100 * test_wmape:.2f}")
-    print(f"Stepwise WMAPE: {stepwise_wmape_test.to_dict()}")
-
-    # =============================================================================
-    # PLOTS + SAVE
-    # =============================================================================
     try:
-        # Para validación: no tenemos predicciones de trainval porque no podemos hacer predict()
-        # después de entrenar con trainval. Usamos un DataFrame vacío para los plots
-        preds_val_plot = pd.DataFrame()
-
-        plot_files = create_prediction_plots(
-            y_val=y_val[TARGET_COL],
-            preds_val=preds_val_plot,
-            y_test=y_test_aligned,
-            y_pred_test=y_pred_test_aligned,
-            model_name=regressor_name,
-            station=station,
-            save_dir=plots_dir,
+        y_pred_test = final_forecaster.predict(
+            steps=S, exog=exog_test if use_exog else None
         )
-        print(f"Graficos creados exitosamente para {regressor_name}")
+        y_true_test, y_pred_test_s = y_test[TARGET_COL].align(
+            y_pred_test["pred"], join="inner"
+        )
+
+        print(f"\n📊 Métricas de backtesting en test:")
+        print(y_pred_test_s)
+
+        wmape_test = wmape(y_true_test, y_pred_test_s)
+        rmse_test = rmse(y_true_test, y_pred_test_s)
+        mae_test = mae(y_true_test, y_pred_test_s)
+        r2_test = r2(y_true_test, y_pred_test_s)
+        mse_test = mse(y_true_test, y_pred_test_s)
+
+        print(f"\n✅ Resultados backtesting TEST:")
+        print(f"   WMAPE: {100 * wmape_test:.2f}%")
+        print(f"   RMSE:  {rmse_test:.4f}")
+        print(f"   MAE:   {mae_test:.4f}")
+        print(f"   MSE:   {mse_test:.4f}")
+        print(f"   R²:    {r2_test:.4f}")
+
+        # Calcular WMAPE por step
+        try:
+            stepwise_wmape_test_series = stepwise_wmape_on_test(
+                y_true_test, y_pred_test_s, H=S
+            )
+            # Convertir Series a diccionario para serialización JSON
+            stepwise_wmape_test = {
+                int(k): float(v) for k, v in stepwise_wmape_test_series.items()
+            }
+            print(f"\n📈 WMAPE por step (primeros 10):")
+            for step, value in list(stepwise_wmape_test.items())[:10]:
+                print(f"   Step {step}: {100 * value:.2f}%")
+        except Exception as e:
+            print(f"⚠️  No se pudo calcular stepwise_wmape: {e}")
+            stepwise_wmape_test = {}
+
+        # Asignar predictions_test solo si el proceso fue exitoso
+        predictions_test = y_pred_test
+
     except Exception as e:
-        print(f"ERROR creando graficos para {regressor_name}: {str(e)}")
-        plot_files = {}
+        print(f"❌ Error en backtesting test: {e}")
+        wmape_test = np.inf
+        predictions_test = None
+        stepwise_wmape_test = {}
+
+    # =============================================================================
+    # GUARDAR RESULTADOS
+    # =============================================================================
+    print("\n" + "=" * 80)
+    print("GUARDANDO RESULTADOS")
+    print("=" * 80)
 
     # Guardar modelo
-    timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-    model_file = models_dir / f"{regressor_name}_model_{timestamp_str}.pkl"
-
-    with open(model_file, "wb") as f:
+    model_filename = f"forecaster_{regressor_name}_S{S}.pkl"
+    model_path = models_dir / model_filename
+    with open(model_path, "wb") as f:
         pickle.dump(final_forecaster, f)
+    print(f"✓ Modelo guardado en: {model_path}")
 
-    print(f"Modelo entrenado guardado en: {model_file}")
+    # Guardar predicciones
+    if predictions_test is not None:
+        pred_filename = f"predictions_{regressor_name}_S{S}.csv"
+        predictions_test.to_csv(results_dir_station / pred_filename)
+        print(f"✓ Predicciones guardadas en: {results_dir_station / pred_filename}")
 
-    # Guardar resultados individuales
-    result_data = {
+    # Crear gráficos
+    if predictions_test is not None and y_true_test is not None:
+        try:
+            # Para LSTM no tenemos datos de validación, pasamos Series vacías
+            y_val_empty = pd.Series(dtype=float)
+            preds_val_empty = pd.DataFrame()
+            create_prediction_plots(
+                y_val=y_val_empty,
+                preds_val=preds_val_empty,
+                y_test=y_true_test,
+                y_pred_test=y_pred_test_s,
+                model_name=regressor_name,
+                station=station,
+                save_dir=plots_dir,
+            )
+            print(f"✓ Gráficos guardados en: {plots_dir}")
+        except Exception as e:
+            print(f"⚠️  Error al crear gráficos: {e}")
+
+    # Preparar resultados finales
+    results_dict = {
         "station": station,
-        "model_type": regressor_name,
-        "use_exog": use_exog,
+        "model": regressor_name,
         "steps": S,
-        "horizon": horizon if horizon > 0 else None,
-        "validation_metrics": {
-            "rmse": float(rmse_tv),
-            "mae": float(mae_tv),
-            "mse": float(mse_tv),
-            "r2": float(r2_tv),
-            "wmape": float(mape_overall_tv),
-            "stepwise_wmape": stepwise_wmape_val.to_dict(),
+        "horizon": horizon,
+        "use_exog": use_exog,
+        "n_exog": len(selected_exog),
+        "lags": selected_lags,
+        "best_params": best_params,
+        "metrics_validation": {
+            "wmape": best_combo["val_wmape"],
         },
-        "test_metrics": {
-            "rmse": float(test_rmse),
-            "mae": float(test_mae),
-            "mse": float(test_mse),
-            "r2": float(test_r2),
-            "wmape": float(test_wmape),
-            "stepwise_wmape": stepwise_wmape_test.to_dict(),
+        "metrics_test": {
+            "wmape": float(wmape_test) if wmape_test != np.inf else None,
+            "rmse": float(rmse_test) if rmse_test is not None else None,
+            "mae": float(mae_test) if mae_test is not None else None,
+            "mse": float(mse_test) if mse_test is not None else None,
+            "r2": float(r2_test) if r2_test is not None else None,
         },
-        "best_params": clean_params_for_json(best_params),
-        "model_file": str(model_file),
-        "plot_files": plot_files,
-        "timestamp": pd.Timestamp.now().isoformat(),
+        "stepwise_wmape_test": stepwise_wmape_test,
     }
 
-    result_file = save_individual_result(
-        result_data=result_data,
-        results_dir=results_dir_station,
-        regressor_name=regressor_name,
-        timestamp_str=timestamp_str,
-    )
+    # Guardar resultados JSON
+    results_json = clean_params_for_json(results_dict)
+    results_filename = f"results_{regressor_name}_S{S}.json"
+    with open(results_dir_station / results_filename, "w", encoding="utf-8") as f:
+        json.dump(results_json, f, indent=2, ensure_ascii=False)
+    print(f"✓ Resultados guardados en: {results_dir_station / results_filename}")
 
-    print(f"Resultados guardados en: {result_file}")
+    # Guardar resumen
+    try:
+        timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        save_individual_result(
+            result_data=results_dict,
+            results_dir=summary_dir,
+            regressor_name=regressor_name,
+            timestamp_str=timestamp_str,
+        )
+        print(f"✓ Resumen guardado en: {summary_dir}")
+    except Exception as e:
+        print(f"⚠️  Error al guardar resumen: {e}")
 
-    # Preparar all_results para save_summary_and_comparison
-    all_results = [
-        {
-            "regressor": regressor_name,
-            "val_rmse": rmse_tv,
-            "val_mae": mae_tv,
-            "val_mse": mse_tv,
-            "val_r2": r2_tv,
-            "val_wmape": mape_overall_tv,
-            "val_stepwise_wmape": stepwise_wmape_val.to_dict(),
-            "test_rmse": test_rmse,
-            "test_mae": test_mae,
-            "test_mse": test_mse,
-            "test_r2": test_r2,
-            "test_wmape": test_wmape,
-            "test_stepwise_wmape": stepwise_wmape_test.to_dict(),
-            "best_params": clean_params_for_json(best_params),
-            "model_file": str(model_file),
-            "plot_files": plot_files,
-        }
-    ]
+    print("\n" + "=" * 80)
+    print("✅ PROCESO COMPLETADO")
+    print("=" * 80)
 
-    # =============================================================================
-    # RESUMEN FINAL
-    # =============================================================================
-    timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-
-    # Imprimir resumen en consola
-    print_results_summary(
-        all_results=all_results,
-        station=station,
-        use_exog=use_exog,
-    )
-
-    # Guardar resumen y comparación
-    summary_file, csv_file = save_summary_and_comparison(
-        all_results=all_results,
-        station=station,
-        use_exog=use_exog,
-        summary_dir=summary_dir,
-        timestamp_str=timestamp_str,
-    )
-
-    print(f"\nResumen completo guardado en: {summary_file}")
-    print(f"Comparacion en CSV guardada en: {csv_file}")
-    print(f"\n✅ Proceso completado para estacion {station}, steps {S}")
-    if horizon > 0:
-        print(f"   Horizonte de shift: {horizon}")
-
-    return {
-        "station": station,
-        "steps": S,
-        "horizon": horizon if horizon > 0 else None,
-        "use_exog": use_exog,
-        "results": all_results,
-        "hyperparameter_search_results": results_df.to_dict("records"),
-        "summary_file": str(summary_file),
-        "csv_file": str(csv_file),
-        "timestamp": timestamp_str,
-    }
+    return results_dict
 
 
 # =============================================================================
-# EJECUCIÓN DIRECTA (para compatibilidad con ejecución antigua)
+# MAIN
 # =============================================================================
 if __name__ == "__main__":
-    # Configuración por defecto para ejecución directa
-    STATION = "CEN-TRAF"  # Opciones: "CEN-TRAF", "GIR-EPM", "ITA-CJUS", "MED-FISC"
-    USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
-    STEPS = 72  # pasos de predicción
-    VAL_MONTHS = 2  # Meses para validación
-    TEST_MONTHS = 2  # Meses para test
-    HORIZON = (
-        0  # Horizonte para shift del target (0 = no shift, >0 = shift hacia adelante)
-    )
+    STATION = "CEN-TRAF"
+    USE_EXOG = True
+    STEPS = 72
+    VAL_MONTHS = 2
+    TEST_MONTHS = 2
+    HORIZON = 0
+
+    # Grid de hiperparámetros más completo (opcional)
+    PARAM_GRID = {
+        "recurrent_units": [[128, 64]],
+        "dense_units": [[64, 32]],
+        "learning_rate": [0.01],
+        "epochs": [1],
+        "batch_size": [128],
+    }
 
     result = train_and_evaluate_models(
         station=STATION,
@@ -674,4 +528,14 @@ if __name__ == "__main__":
         val_months=VAL_MONTHS,
         test_months=TEST_MONTHS,
         horizon=HORIZON,
+        param_grid=PARAM_GRID,  # Usa None para el grid por defecto
     )
+
+    print("\n" + "=" * 80)
+    print("RESUMEN FINAL")
+    print("=" * 80)
+    print(f"Estación: {result['station']}")
+    print(f"Modelo: {result['model']}")
+    print(f"Steps: {result['steps']}")
+    print(f"WMAPE Validación: {100 * result['metrics_validation']['wmape']:.2f}%")
+    print(f"WMAPE Test: {100 * result['metrics_test']['wmape']:.2f}%")
