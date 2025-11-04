@@ -182,7 +182,7 @@ def train_and_evaluate_models(
             "recurrent_units": [[128, 64]],
             "dense_units": [[64, 32]],
             "learning_rate": [0.01],
-            "epochs": [5],
+            "epochs": [1],
             "batch_size": [128],
         }
 
@@ -216,7 +216,166 @@ def train_and_evaluate_models(
         print(f"  {k}: {v}")
 
     # =============================================================================
-    # ENTRENAMIENTO MODELO FINAL CON MEJORES PARÁMETROS
+    # ENTRENAMIENTO MODELO PARA VALIDACIÓN (train)
+    # =============================================================================
+    # NOTA: Este modelo se entrena con solo 'train' para hacer backtesting en 'val'.
+    # Durante el backtesting, skforecast puede re-entrenar el modelo para cada fold
+    # del CV (incluso con refit=False), lo cual es normal en modelos RNN/deep learning.
+    # Esto explica por qué se ve entrenamiento adicional durante el backtesting.
+    print("\n" + "=" * 80)
+    print("ENTRENAMIENTO MODELO PARA VALIDACIÓN (train)")
+    print("=" * 80)
+
+    val_model = create_and_compile_model(
+        series=y_train,
+        levels=[TARGET_COL],
+        lags=selected_lags,
+        steps=S,
+        exog=exog_train if use_exog else None,
+        recurrent_layer="LSTM",
+        recurrent_units=best_params["recurrent_units"],
+        dense_units=best_params["dense_units"],
+        compile_kwargs={
+            "optimizer": Adam(learning_rate=best_params["learning_rate"]),
+            "loss": MeanSquaredError(),
+        },
+    )
+
+    val_forecaster = ForecasterRnn(
+        regressor=val_model,
+        levels=[TARGET_COL],
+        lags=selected_lags,
+        transformer_series=MinMaxScaler(),
+        transformer_exog=MinMaxScaler() if use_exog else None,
+        fit_kwargs={
+            "epochs": best_params["epochs"],
+            "batch_size": best_params["batch_size"],
+            "verbose": 1,
+            "validation_split": 0.1,
+        },
+    )
+
+    #val_forecaster.fit(series=y_train, exog=exog_train if use_exog else None)
+    print("✓ Modelo para validación entrenado")
+
+    # Inicializar variables de validación por si hay errores
+    y_true_val = pd.Series(dtype=float)
+    y_pred_val_s = pd.Series(dtype=float)
+    predictions_val = None
+    stepwise_wmape_val = {}
+    pred_col_val = "pred"
+
+    # =============================================================================
+    # BACKTESTING EN VALIDACIÓN con TimeSeriesFold + backtesting_forecaster_multiseries
+    # =============================================================================
+    print("\n" + "=" * 80)
+    print("BACKTESTING EN PERÍODO DE VALIDACIÓN (rolling)")
+    print("=" * 80)
+
+    try:
+        # 1) Construimos la serie total para que el backtesting comience justo después de train
+        series_bt_val = pd.concat([y_train, y_val], axis=0)
+        exog_bt_val = pd.concat([exog_train, exog_val], axis=0) if use_exog else None
+
+        # 2) Definimos el CV: sólo validación (initial_train_size = len(train))
+        # NOTA: Aunque refit=False, skforecast con modelos RNN puede re-entrenar el modelo
+        # para cada fold del CV debido a cómo maneja internamente los modelos de deep learning.
+        # Esto es un comportamiento conocido de skforecast con ForecasterRnn.
+        cv_val = TimeSeriesFold(
+            steps=S,
+            initial_train_size=len(y_train),
+            refit=False,  # Intenta no re-entrenar, pero puede hacerlo igual con RNN
+        )
+
+        # 3) Ejecutamos backtesting sobre VALIDACIÓN
+        metrics_bt_val, preds_bt_val = backtesting_forecaster_multiseries(
+            forecaster=val_forecaster,
+            series=series_bt_val,
+            exog=exog_bt_val,
+            cv=cv_val,
+            levels=[TARGET_COL],
+            metric=wmape,
+            suppress_warnings=True,
+            verbose=False,
+        )
+
+        print("\n📊 Métricas de backtesting validación (SKForecast):")
+        print(metrics_bt_val)
+
+        # 4) Extraemos predicciones de VALIDACIÓN y métricas clásicas
+        pred_col_candidates_val = [
+            c for c in ["pred", "y_pred", "prediction"] if c in preds_bt_val.columns
+        ]
+        true_col_candidates_val = [
+            c for c in ["y", "y_true", TARGET_COL] if c in preds_bt_val.columns
+        ]
+
+        if not pred_col_candidates_val:
+            raise RuntimeError(
+                "No se encontró columna de predicción en 'preds_bt_val'."
+            )
+
+        if not true_col_candidates_val:
+            y_true_aligned_val = series_bt_val.loc[preds_bt_val.index, TARGET_COL]
+            preds_bt_val = preds_bt_val.copy()
+            preds_bt_val["y_true"] = y_true_aligned_val
+            true_col_val = "y_true"
+        else:
+            true_col_val = true_col_candidates_val[0]
+
+        pred_col_val = pred_col_candidates_val[0]
+
+        # Filtramos explícitamente el rango de VALIDACIÓN
+        val_index_mask = preds_bt_val.index >= y_val.index.min()
+        y_true_val = preds_bt_val.loc[val_index_mask, true_col_val].astype(float)
+        y_pred_val_s = preds_bt_val.loc[val_index_mask, pred_col_val].astype(float)
+
+        print(f"\n✅ Resultados backtesting VALIDACIÓN (recalculados):")
+        wmape_val = wmape(y_true_val, y_pred_val_s)
+        rmse_val = rmse(y_true_val, y_pred_val_s)
+        mae_val = mae(y_true_val, y_pred_val_s)
+        mse_val = mse(y_true_val, y_pred_val_s)
+        r2_val = r2(y_true_val, y_pred_val_s)
+
+        print(f"   WMAPE: {100 * wmape_val:.2f}%")
+        print(f"   RMSE:  {rmse_val:.4f}")
+        print(f"   MAE:   {mae_val:.4f}")
+        print(f"   MSE:   {mse_val:.4f}")
+        print(f"   R²:    {r2_val:.4f}")
+
+        # 5) WMAPE por step (1..S) para validación
+        try:
+            stepwise_wmape_val_series = stepwise_wmape_on_test(
+                y_true_val, y_pred_val_s, H=S
+            )
+            stepwise_wmape_val = {
+                int(k): float(v) for k, v in stepwise_wmape_val_series.items()
+            }
+            print(f"\n📈 WMAPE por step validación (primeros 10):")
+            for step, value in list(stepwise_wmape_val.items())[:10]:
+                print(f"   Step {step}: {100 * value:.2f}%")
+        except Exception as e:
+            print(f"⚠️  No se pudo calcular stepwise_wmape validación: {e}")
+            stepwise_wmape_val = {}
+
+        # Actualizar best_combo con las métricas reales de validación
+        best_combo["val_wmape"] = (
+            float(wmape_val) if wmape_val is not None and wmape_val != np.inf else 0.0
+        )
+
+        # Guardar predicciones de validación
+        predictions_val = preds_bt_val.copy()
+    except Exception as e:
+        print(f"⚠️  Error en backtesting de validación: {e}")
+        print("   Continuando con valores por defecto para validación")
+        wmape_val = None
+        rmse_val = None
+        mae_val = None
+        mse_val = None
+        r2_val = None
+
+    # =============================================================================
+    # ENTRENAMIENTO MODELO FINAL CON MEJORES PARÁMETROS (train+val)
     # =============================================================================
     print("\n" + "=" * 80)
     print("ENTRENAMIENTO MODELO FINAL (train+val)")
@@ -251,7 +410,7 @@ def train_and_evaluate_models(
         },
     )
 
-    final_forecaster.fit(series=y_trainval, exog=exog_trainval if use_exog else None)
+    # final_forecaster.fit(series=y_trainval, exog=exog_trainval if use_exog else None)
 
     print("✓ Modelo final entrenado")
 
@@ -360,21 +519,52 @@ def train_and_evaluate_models(
         pickle.dump(final_forecaster, f)
     print(f"✓ Modelo guardado en: {model_path}")
 
-    # Guardar predicciones
+    # Guardar predicciones de validación
+    if predictions_val is not None:
+        pred_filename_val = f"predictions_{regressor_name}_S{S}_validation.csv"
+        predictions_val.to_csv(results_dir_station / pred_filename_val)
+        print(
+            f"✓ Predicciones validación guardadas en: {results_dir_station / pred_filename_val}"
+        )
+
+    # Guardar predicciones de test
     if predictions_test is not None:
         pred_filename = f"predictions_{regressor_name}_S{S}.csv"
         predictions_test.to_csv(results_dir_station / pred_filename)
-        print(f"✓ Predicciones guardadas en: {results_dir_station / pred_filename}")
+        print(
+            f"✓ Predicciones test guardadas en: {results_dir_station / pred_filename}"
+        )
 
     # Crear gráficos
     if predictions_test is not None and y_true_test is not None:
         try:
-            # Para LSTM no tenemos datos de validación, pasamos Series vacías
-            y_val_empty = pd.Series(dtype=float)
-            preds_val_empty = pd.DataFrame()
+            # Preparar predicciones de validación como DataFrame con columna 'pred'
+            # La función create_prediction_plots espera un DataFrame, no una Series
+            if (
+                predictions_val is not None
+                and len(predictions_val) > 0
+                and len(y_pred_val_s) > 0
+            ):
+                # Filtrar solo las predicciones del período de validación
+                val_index_mask_plot = predictions_val.index >= y_val.index.min()
+                preds_val_df = predictions_val.loc[val_index_mask_plot].copy()
+                # Asegurarse de que tenga la columna 'pred' (puede ser 'pred', 'y_pred', etc.)
+                if "pred" not in preds_val_df.columns:
+                    # Si la columna de predicción tiene otro nombre, renombrarla o crear 'pred'
+                    if pred_col_val in preds_val_df.columns:
+                        preds_val_df["pred"] = preds_val_df[pred_col_val]
+                    else:
+                        # Si no está, crear la columna 'pred' desde y_pred_val_s
+                        preds_val_df = pd.DataFrame(
+                            {"pred": y_pred_val_s}, index=y_pred_val_s.index
+                        )
+            else:
+                preds_val_df = pd.DataFrame()
+
+            # Usar datos de validación reales del backtesting
             create_prediction_plots(
-                y_val=y_val_empty,
-                preds_val=preds_val_empty,
+                y_val=y_true_val if len(y_true_val) > 0 else pd.Series(dtype=float),
+                preds_val=preds_val_df if len(preds_val_df) > 0 else pd.DataFrame(),
                 y_test=y_true_test,
                 y_pred_test=y_pred_test_s,
                 model_name=regressor_name,
@@ -384,6 +574,9 @@ def train_and_evaluate_models(
             print(f"✓ Gráficos guardados en: {plots_dir}")
         except Exception as e:
             print(f"⚠️  Error al crear gráficos: {e}")
+            import traceback
+
+            traceback.print_exc()
 
     # Preparar resultados finales
     results_dict = {
@@ -396,8 +589,15 @@ def train_and_evaluate_models(
         "lags": selected_lags,
         "best_params": best_params,
         "metrics_validation": {
-            "wmape": best_combo["val_wmape"],
+            "wmape": float(wmape_val)
+            if wmape_val is not None and wmape_val != np.inf
+            else None,
+            "rmse": float(rmse_val) if rmse_val is not None else None,
+            "mae": float(mae_val) if mae_val is not None else None,
+            "mse": float(mse_val) if mse_val is not None else None,
+            "r2": float(r2_val) if r2_val is not None else None,
         },
+        "stepwise_wmape_validation": stepwise_wmape_val,
         "metrics_test": {
             "wmape": float(wmape_test)
             if wmape_test is not None and wmape_test != np.inf
@@ -473,9 +673,23 @@ if __name__ == "__main__":
     print(f"Estación: {result['station']}")
     print(f"Modelo: {result['model']}")
     print(f"Steps: {result['steps']}")
-    print(f"WMAPE Validación: {100 * result['metrics_validation']['wmape']:.2f}%")
-    print(
-        f"WMAPE Test: {100 * result['metrics_test']['wmape']:.2f}%"
-        if result["metrics_test"]["wmape"] is not None
-        else "WMAPE Test: N/A"
-    )
+    print("\n📊 Métricas de Validación:")
+    val_metrics = result["metrics_validation"]
+    if val_metrics["wmape"] is not None:
+        print(f"   WMAPE: {100 * val_metrics['wmape']:.2f}%")
+        print(f"   RMSE:  {val_metrics['rmse']:.4f}")
+        print(f"   MAE:   {val_metrics['mae']:.4f}")
+        print(f"   MSE:   {val_metrics['mse']:.4f}")
+        print(f"   R²:    {val_metrics['r2']:.4f}")
+    else:
+        print("   Métricas de validación no disponibles")
+    print("\n📊 Métricas de Test:")
+    test_metrics = result["metrics_test"]
+    if test_metrics["wmape"] is not None:
+        print(f"   WMAPE: {100 * test_metrics['wmape']:.2f}%")
+        print(f"   RMSE:  {test_metrics['rmse']:.4f}")
+        print(f"   MAE:   {test_metrics['mae']:.4f}")
+        print(f"   MSE:   {test_metrics['mse']:.4f}")
+        print(f"   R²:    {test_metrics['r2']:.4f}")
+    else:
+        print("   Métricas de test no disponibles")

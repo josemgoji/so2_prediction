@@ -338,7 +338,7 @@ if __name__ == "__main__":
     ]
 
     # Lista de steps a procesar (en horas) - número de pasos de predicción
-    STEPS = [n for n in range(1, 13)] # lista del 7 al 36
+    STEPS = [n for n in range(1, 2)] # lista del 7 al 36
     # Configuración general
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
     VAL_MONTHS = 2  # Meses para validación
