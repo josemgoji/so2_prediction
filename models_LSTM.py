@@ -37,6 +37,7 @@ from src.utils.results_manager import (
 from skforecast.deep_learning import ForecasterRnn
 from skforecast.deep_learning import create_and_compile_model
 from skforecast.model_selection import backtesting_forecaster_multiseries
+from skforecast.model_selection import TimeSeriesFold  # <-- necesario
 
 from src.constants.parsed_fields import MODEL_RESULTS_CONFIG
 
@@ -194,9 +195,7 @@ def train_and_evaluate_models(
 
     # =============================================================================
     # MODO RÁPIDO: Usar primer parámetro del grid directamente (sin búsqueda)
-    # COMENTAR ESTE BLOQUE cuando se descomente la búsqueda de hiperparámetros
     # =============================================================================
-    # Extraer primer conjunto de parámetros del grid
     first_params = grid[0]
     rec_units, dense_units, lr, epochs, batch_size = first_params
     best_params = {
@@ -215,94 +214,6 @@ def train_and_evaluate_models(
     print("=" * 80)
     for k, v in best_params.items():
         print(f"  {k}: {v}")
-
-    # =============================================================================
-    # BÚSQUEDA DE HIPERPARÁMETROS (descomentar para activar)
-    # DESCOMENTAR ESTE BLOQUE y comentar el bloque "MODO RÁPIDO" arriba
-    # =============================================================================
-    # for i, params in enumerate(grid, 1):
-    #     rec_units, dense_units, lr, epochs, batch_size = params
-    #     print(
-    #         f"\n[{i}/{len(grid)}] Probando: rec={rec_units}, dense={dense_units}, "
-    #         f"lr={lr}, epochs={epochs}, batch={batch_size}"
-    #     )
-
-    #     try:
-    #         temp_model = create_and_compile_model(
-    #             series=y_train,
-    #             levels=[TARGET_COL],
-    #             lags=selected_lags,
-    #             steps=S,
-    #             exog=exog_train if use_exog else None,
-    #             recurrent_layer="LSTM",
-    #             recurrent_units=rec_units,
-    #             dense_units=dense_units,
-    #             compile_kwargs={
-    #                 "optimizer": Adam(learning_rate=lr),
-    #                 "loss": MeanSquaredError(),
-    #             },
-    #         )
-
-    #         temp_forecaster = ForecasterRnn(
-    #             regressor=temp_model,
-    #             levels=[TARGET_COL],
-    #             lags=selected_lags,
-    #             transformer_series=MinMaxScaler(),
-    #             transformer_exog=MinMaxScaler() if use_exog else None,
-    #             fit_kwargs={
-    #                 "epochs": epochs,
-    #                 "batch_size": batch_size,
-    #                 "verbose": 0,
-    #                 "validation_split": 0.1,
-    #             },
-    #         )
-
-    #         temp_forecaster.fit(series=y_train, exog=exog_train if use_exog else None)
-
-    #         # Predicción simple en validación para selección de modelo
-    #         y_pred_val = temp_forecaster.predict(
-    #             steps=S, exog=exog_val if use_exog else None
-    #         )
-    #         y_true_val, y_pred_val_s = y_val[TARGET_COL].align(
-    #             y_pred_val["pred"], join="inner"
-    #         )
-
-    #         val_wmape = wmape(y_true_val, y_pred_val_s)
-    #         print(f"   ✓ WMAPE validación: {100 * val_wmape:.2f}%")
-
-    #         results_list.append(
-    #             dict(
-    #                 recurrent_units=rec_units,
-    #                 dense_units=dense_units,
-    #                 learning_rate=lr,
-    #                 epochs=epochs,
-    #                 batch_size=batch_size,
-    #                 val_wmape=float(val_wmape),
-    #             )
-    #         )
-
-    #     except Exception as e:
-    #         print(f"   ❌ Error en combo {params}: {e}")
-    #
-    # if not results_list:
-    #     raise ValueError("No se pudo entrenar ningún modelo.")
-    #
-    # results_df = pd.DataFrame(results_list).sort_values("val_wmape")
-    # best_combo = results_df.iloc[0].to_dict()
-    # best_params = {
-    #     "recurrent_units": best_combo["recurrent_units"],
-    #     "dense_units": best_combo["dense_units"],
-    #     "learning_rate": best_combo["learning_rate"],
-    #     "epochs": int(best_combo["epochs"]),
-    #     "batch_size": int(best_combo["batch_size"]),
-    # }
-    #
-    # print("\n" + "=" * 80)
-    # print("MEJORES HIPERPARÁMETROS")
-    # print("=" * 80)
-    # for k, v in best_params.items():
-    #     print(f"  {k}: {v}")
-    # print(f"  WMAPE validación: {100 * best_combo['val_wmape']:.2f}%")
 
     # =============================================================================
     # ENTRENAMIENTO MODELO FINAL CON MEJORES PARÁMETROS
@@ -345,72 +256,95 @@ def train_and_evaluate_models(
     print("✓ Modelo final entrenado")
 
     # =============================================================================
-    # BACKTESTING EN TEST
+    # BACKTESTING EN TEST con TimeSeriesFold + backtesting_forecaster_multiseries
     # =============================================================================
     print("\n" + "=" * 80)
-    print("BACKTESTING EN PERÍODO DE TEST")
+    print("BACKTESTING EN PERÍODO DE TEST (rolling)")
     print("=" * 80)
 
-    # Inicializar variables para evitar UnboundLocalError
-    predictions_test = None
-    y_pred_test = None
-    y_true_test = None
-    y_pred_test_s = None
-    wmape_test = np.inf
-    rmse_test = None
-    mae_test = None
-    r2_test = None
-    mse_test = None
-    stepwise_wmape_test = {}
+    # 1) Construimos la serie total para que el backtesting comience justo después de train+val
+    series_bt = pd.concat([y_trainval, y_test], axis=0)
+    exog_bt = pd.concat([exog_trainval, exog_test], axis=0) if use_exog else None
 
+    # 2) Definimos el CV: sólo test (initial_train_size = len(train+val))
+    cv = TimeSeriesFold(
+        steps=S,  # = final_forecaster.max_step si prefieres
+        initial_train_size=len(y_trainval),
+        refit=False,
+    )
+
+    # 3) Ejecutamos backtesting sobre TEST
+    metrics_bt, preds_bt = backtesting_forecaster_multiseries(
+        forecaster=final_forecaster,
+        series=series_bt,  # DataFrame con la columna TARGET_COL
+        exog=exog_bt,  # exógenas alineadas (o None)
+        cv=cv,
+        levels=[TARGET_COL],
+        metric="mean_absolute_error",  # cambia si prefieres
+        suppress_warnings=True,
+        verbose=False,
+    )
+
+    print("\n📊 Métricas de backtesting (SKForecast):")
+    print(metrics_bt)
+
+    # 4) Extraemos predicciones de TEST y métricas clásicas
+    pred_col_candidates = [
+        c for c in ["pred", "y_pred", "prediction"] if c in preds_bt.columns
+    ]
+    true_col_candidates = [
+        c for c in ["y", "y_true", TARGET_COL] if c in preds_bt.columns
+    ]
+
+    if not pred_col_candidates:
+        raise RuntimeError("No se encontró columna de predicción en 'preds_bt'.")
+
+    if not true_col_candidates:
+        # reconstruimos y_true a partir del índice de preds_bt
+        y_true_aligned = series_bt.loc[preds_bt.index, TARGET_COL]
+        preds_bt = preds_bt.copy()
+        preds_bt["y_true"] = y_true_aligned
+        true_col = "y_true"
+    else:
+        true_col = true_col_candidates[0]
+
+    pred_col = pred_col_candidates[0]
+
+    # Filtramos explícitamente el rango de TEST
+    test_index_mask = preds_bt.index >= y_test.index.min()
+    y_true_test = preds_bt.loc[test_index_mask, true_col].astype(float)
+    y_pred_test_s = preds_bt.loc[test_index_mask, pred_col].astype(float)
+
+    print(f"\n✅ Resultados backtesting TEST (recalculados):")
+    wmape_test = wmape(y_true_test, y_pred_test_s)
+    rmse_test = rmse(y_true_test, y_pred_test_s)
+    mae_test = mae(y_true_test, y_pred_test_s)
+    mse_test = mse(y_true_test, y_pred_test_s)
+    r2_test = r2(y_true_test, y_pred_test_s)
+
+    print(f"   WMAPE: {100 * wmape_test:.2f}%")
+    print(f"   RMSE:  {rmse_test:.4f}")
+    print(f"   MAE:   {mae_test:.4f}")
+    print(f"   MSE:   {mse_test:.4f}")
+    print(f"   R²:    {r2_test:.4f}")
+
+    # 5) WMAPE por step (1..S)
     try:
-        y_pred_test = final_forecaster.predict(
-            steps=S, exog=exog_test if use_exog else None
+        stepwise_wmape_test_series = stepwise_wmape_on_test(
+            y_true_test, y_pred_test_s, H=S
         )
-        y_true_test, y_pred_test_s = y_test[TARGET_COL].align(
-            y_pred_test["pred"], join="inner"
-        )
-
-        print(f"\n📊 Métricas de backtesting en test:")
-        print(y_pred_test_s)
-
-        wmape_test = wmape(y_true_test, y_pred_test_s)
-        rmse_test = rmse(y_true_test, y_pred_test_s)
-        mae_test = mae(y_true_test, y_pred_test_s)
-        r2_test = r2(y_true_test, y_pred_test_s)
-        mse_test = mse(y_true_test, y_pred_test_s)
-
-        print(f"\n✅ Resultados backtesting TEST:")
-        print(f"   WMAPE: {100 * wmape_test:.2f}%")
-        print(f"   RMSE:  {rmse_test:.4f}")
-        print(f"   MAE:   {mae_test:.4f}")
-        print(f"   MSE:   {mse_test:.4f}")
-        print(f"   R²:    {r2_test:.4f}")
-
-        # Calcular WMAPE por step
-        try:
-            stepwise_wmape_test_series = stepwise_wmape_on_test(
-                y_true_test, y_pred_test_s, H=S
-            )
-            # Convertir Series a diccionario para serialización JSON
-            stepwise_wmape_test = {
-                int(k): float(v) for k, v in stepwise_wmape_test_series.items()
-            }
-            print(f"\n📈 WMAPE por step (primeros 10):")
-            for step, value in list(stepwise_wmape_test.items())[:10]:
-                print(f"   Step {step}: {100 * value:.2f}%")
-        except Exception as e:
-            print(f"⚠️  No se pudo calcular stepwise_wmape: {e}")
-            stepwise_wmape_test = {}
-
-        # Asignar predictions_test solo si el proceso fue exitoso
-        predictions_test = y_pred_test
-
+        stepwise_wmape_test = {
+            int(k): float(v) for k, v in stepwise_wmape_test_series.items()
+        }
+        print(f"\n📈 WMAPE por step (primeros 10):")
+        for step, value in list(stepwise_wmape_test.items())[:10]:
+            print(f"   Step {step}: {100 * value:.2f}%")
     except Exception as e:
-        print(f"❌ Error en backtesting test: {e}")
-        wmape_test = np.inf
-        predictions_test = None
+        print(f"⚠️  No se pudo calcular stepwise_wmape: {e}")
         stepwise_wmape_test = {}
+
+    # Para compatibilidad con tu pipeline de guardado:
+    predictions_test = preds_bt.copy()
 
     # =============================================================================
     # GUARDAR RESULTADOS
@@ -465,7 +399,9 @@ def train_and_evaluate_models(
             "wmape": best_combo["val_wmape"],
         },
         "metrics_test": {
-            "wmape": float(wmape_test) if wmape_test != np.inf else None,
+            "wmape": float(wmape_test)
+            if wmape_test is not None and wmape_test != np.inf
+            else None,
             "rmse": float(rmse_test) if rmse_test is not None else None,
             "mae": float(mae_test) if mae_test is not None else None,
             "mse": float(mse_test) if mse_test is not None else None,
@@ -538,4 +474,8 @@ if __name__ == "__main__":
     print(f"Modelo: {result['model']}")
     print(f"Steps: {result['steps']}")
     print(f"WMAPE Validación: {100 * result['metrics_validation']['wmape']:.2f}%")
-    print(f"WMAPE Test: {100 * result['metrics_test']['wmape']:.2f}%")
+    print(
+        f"WMAPE Test: {100 * result['metrics_test']['wmape']:.2f}%"
+        if result["metrics_test"]["wmape"] is not None
+        else "WMAPE Test: N/A"
+    )
