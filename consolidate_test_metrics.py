@@ -165,7 +165,7 @@ def main():
     print("CONSOLIDACIÓN DE MÉTRICAS DE TEST Y VALIDACIÓN")
     print("=" * 80)
 
-    base_dir = Path("data/analytics/model_results/CEN-TRAF/con_exog/direct")
+    base_dir = Path("data/analytics/model_results/MED-FISC/con_exog/")
 
     if not base_dir.exists():
         print(f"❌ Error: No existe el directorio {base_dir}")

@@ -328,18 +328,18 @@ if __name__ == "__main__":
     # =============================================================================
     # Lista de estaciones a procesar
     STATIONS = [
-        "CEN-TRAF",
-        "GIR-EPM",
-        "ITA-CJUS",
+        #"CEN-TRAF",
+        #"GIR-EPM",
+        #"ITA-CJUS",
         "MED-FISC",
     ]
 
     # Lista de steps a procesar (en horas) - pasos hacia adelante que se predicen
-    STEPS = list(range(1, 73))  # Del 1 al 72
+    STEPS = list(range(51, 73))  # Del 1 al 72
 
     # Configuración general
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
-    N_TRIALS = 10
+    N_TRIALS = 1
     STUDY_STORAGE = None  # ej: "sqlite:///optuna.db" si quieres persistir estudios
     VAL_MONTHS = 2  # Meses para validación
     TEST_MONTHS = 2  # Meses para test

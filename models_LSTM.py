@@ -182,7 +182,7 @@ def train_and_evaluate_models(
             "recurrent_units": [[128, 64]],
             "dense_units": [[64, 32]],
             "learning_rate": [0.01],
-            "epochs": [1],
+            "epochs": [5],
             "batch_size": [128],
         }
 

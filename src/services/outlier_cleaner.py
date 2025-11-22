@@ -183,7 +183,7 @@ class DataCleaning:
         df_multi = self.impute_and_filter(df).dropna()
 
         # Detectar outliers multivariables
-        X = df_multi.values  # Ya imputado, no necesita dropna
+        X = df_multi.values
         initial_projections = [np.random.rand(X.shape[1]) for _ in range(1000)]
         initial_projections = [v / np.linalg.norm(v) for v in initial_projections]
         projected_data = [np.dot(X, v) for v in initial_projections]

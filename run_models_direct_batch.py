@@ -335,14 +335,14 @@ if __name__ == "__main__":
     # =============================================================================
     # Lista de estaciones a procesar
     STATIONS = [
-        "CEN-TRAF",
-        # "GIR-EPM",
-        # "ITA-CJUS",
-        # "MED-FISC",
+        #"CEN-TRAF",
+        "GIR-EPM",
+        #"ITA-CJUS",
+        #"MED-FISC",
     ]
 
     # Lista de steps a procesar (en horas) - número de pasos que se predicen simultáneamente
-    STEPS = list(range(37, 73)) # cambiar 48-61
+    STEPS = list(range(17, 73)) #
 
     # Configuración general
     USE_EXOG = True  # True para modelo con exógenas, False para sin exógenas
